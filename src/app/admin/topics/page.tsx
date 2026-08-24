@@ -1,0 +1,2 @@
+export default function TopicsPage() { return <Placeholder title="موضوعات" description="مدیریت ساختار موضوعی در مرحله بعد تکمیل می‌شود." />; }
+function Placeholder({ title, description }: { title: string; description: string }) { return <section className="rounded-3xl border border-slate-200 bg-white p-8 shadow-sm"><span className="rounded-full bg-amber-50 px-3 py-1 text-xs font-bold text-amber-700">در دست توسعه</span><h1 className="mt-5 text-2xl font-black">{title}</h1><p className="mt-3 text-slate-500">{description}</p></section>; }

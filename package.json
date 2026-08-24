@@ -6,18 +6,29 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "rag:create-vector-store": "node scripts/create-vector-store.mjs",
+    "pb:configure-usage-schema": "node --env-file=.env.local scripts/configure-usage-schema.mjs",
+    "pb:configure-classification-schema": "node --env-file=.env.local scripts/configure-classification-schema.mjs",
+    "pb:configure-knowledge-security": "node --env-file=.env.local scripts/configure-knowledge-security.mjs",
+    "pb:configure-accounts-security": "node --env-file=.env.local scripts/configure-accounts-security.mjs",
+    "pb:configure-analytics-indexes": "node --env-file=.env.local scripts/configure-analytics-indexes.mjs"
   },
   "dependencies": {
     "next": "16.3.1",
+    "openai": "^7.5.0",
+    "pocketbase": "^0.27.3",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "vazirmatn": "^33.0.3",
+    "zod": "4.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "dotenv": "^17.4.2",
     "eslint": "^9",
     "eslint-config-next": "16.3.1",
     "tailwindcss": "^4",
