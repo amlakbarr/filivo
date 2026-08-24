@@ -120,6 +120,8 @@ const nextConfig:
    */
   poweredByHeader:
     false,
+  devIndicators:
+    false,
 
   /*
    * ==========================================
