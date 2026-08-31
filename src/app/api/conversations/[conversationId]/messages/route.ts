@@ -3,6 +3,8 @@ import {
   NextResponse,
 } from "next/server";
 
+import type OpenAI from "openai";
+
 import type PocketBase from "pocketbase";
 
 import type {
@@ -2516,53 +2518,6 @@ export async function POST(
             conversation.title
           );
 
-    let warning:
-      | string
-      | undefined;
-
-    let warningCode:
-      | string
-      | undefined;
-
-    setStage(
-      "conversation_update"
-    );
-
-    if (
-      newTitle !==
-      conversation.title
-    ) {
-      try {
-        await pb
-          .collection(
-            "conversations"
-          )
-          .update(
-            conversation.id,
-            {
-              title:
-                newTitle,
-            }
-          );
-      } catch (error) {
-        logStageError(
-          requestId,
-          stage,
-          error,
-          {
-            operation:
-              "update_conversation_title",
-          }
-        );
-
-        warning =
-          "پاسخ دریافت شد، اما عنوان گفتگو ذخیره نشد.";
-
-        warningCode =
-          "CONVERSATION_TITLE_UPDATE_FAILED";
-      }
-    }
-
     /*
      * ========================================
      * Assistant Message
@@ -2792,173 +2747,93 @@ export async function POST(
 
     /*
      * ========================================
-     * Conversation Last Message
+     * Background Finalization
+     *
+     * Assistant Message در این نقطه Durable است.
+     * کارهای زیر دیگر برای نمایش پاسخ به کاربر
+     * لازم نیستند:
+     *
+     * - Conversation title
+     * - last_message_at
+     * - AI usage accounting
+     * - Budget reservation completion
+     * - Background classification
+     * - Knowledge gap tracking
+     *
+     * اگر Background accounting دیر شود،
+     * Reservation pending باقی می‌ماند و Budget
+     * محافظه‌کارانه‌تر محاسبه می‌شود؛ under-count
+     * ایجاد نمی‌شود.
      * ========================================
      */
 
-    setStage(
-      "conversation_update"
-    );
-
-    try {
-      await pb
-        .collection(
-          "conversations"
-        )
-        .update(
-          conversation.id,
-          {
-            last_message_at:
-              assistantMessage.created,
-          }
-        );
-    } catch (error) {
-      logStageError(
-        requestId,
-        stage,
-        error,
-        {
-          operation:
-            "update_conversation",
-        }
-      );
-
-      if (!warning) {
-        warning =
-          "پیام ذخیره شد، اما زمان گفتگو به‌روزرسانی نشد.";
-
-        warningCode =
-          "CONVERSATION_UPDATE_FAILED";
-      }
-    }
-
-    /*
-     * ========================================
-     * AI Usage
-     * ========================================
-     */
-
-    const usageResult =
-      await recordAIUsageChecked(
-        requestId,
-        {
-          userId:
-            account.id,
-
-          conversationId:
-            conversation.id,
-
-          messageId:
-            assistantMessage.id,
-
-          requestType:
-            "chat",
-
-          reservationRequestId:
+    after(
+      async () => {
+        await Promise.allSettled([
+          finalizeSuccessfulChatInBackground({
             requestId,
 
-          model,
+            userId:
+              account.id,
 
-          latencyMs:
+            conversationId:
+              conversation.id,
+
+            previousTitle:
+              String(
+                conversation.title ||
+                  ""
+              ),
+
+            newTitle,
+
+            assistantCreated:
+              String(
+                assistantMessage.created ||
+                  ""
+              ),
+
+            assistantMessageId:
+              assistantMessage.id,
+
+            model,
+
             responseTime,
 
-          success:
-            true,
-
-          response:
             openAIResponse,
-        }
-      );
+          }),
 
-    let reservationCompleted =
-      false;
+          runPostResponseTasks({
+            requestId,
 
-    if (
-      usageResult.ok
-    ) {
-      reservationCompleted =
-        await completeChatBudgetReservationSafely({
-          requestId,
+            userMessageId:
+              userMessage.id,
 
-          userId:
-            account.id,
+            assistantMessageId:
+              assistantMessage.id,
 
-          usageResult,
-        });
-    }
+            backgroundClassification:
+              topicScopedRetrievalEnabled
+                ? undefined
+                : {
+                    question:
+                      content,
 
-    if (
-      !usageResult.ok ||
-      !reservationCompleted
-    ) {
-      /*
-       * پاسخ AI و Assistant Message قبلاً با
-       * موفقیت ایجاد شده‌اند.
-       *
-       * در این مرحله 503 دادن مصرف انجام‌شده را
-       * Undo نمی‌کند و فقط UX را خراب می‌کند.
-       *
-       * بنابراین Success حفظ می‌شود ولی Failure
-       * Accounting/Reservation صریح گزارش می‌شود.
-       */
+                    context:
+                      history,
 
-      if (
-        !warning
-      ) {
-        if (
-          !usageResult.ok
-        ) {
-          warning =
-            "پاسخ دریافت شد، اما ثبت مصرف هوش مصنوعی کامل نشد.";
+                    userId:
+                      account.id,
 
-          warningCode =
-            "AI_USAGE_ACCOUNTING_FAILED";
-        } else {
-          warning =
-            "پاسخ دریافت شد، اما نهایی‌سازی رزرو سهمیه هوش مصنوعی کامل نشد.";
+                    conversationId:
+                      conversation.id,
 
-          warningCode =
-            "AI_BUDGET_RESERVATION_COMPLETION_FAILED";
-        }
+                    messageId:
+                      userMessage.id,
+                  },
+          }),
+        ]);
       }
-    }
-
-    /*
-     * ========================================
-     * Background Tasks
-     * ========================================
-     */
-
-    after(() =>
-      runPostResponseTasks({
-        requestId,
-
-        userMessageId:
-          userMessage.id,
-
-        assistantMessageId:
-          assistantMessage.id,
-
-        backgroundClassification:
-          topicScopedRetrievalEnabled
-            ? undefined
-            : {
-                question:
-                  content,
-
-                context:
-                  history,
-
-                userId:
-                  account.id,
-
-                conversationId:
-                  conversation.id,
-
-                messageId:
-                  userMessage.id,
-              },
-      })
     );
 
     /*
@@ -2989,10 +2864,6 @@ export async function POST(
 
       responseId:
         openAIResponse.id,
-
-      warning,
-
-      warningCode,
     });
   } catch (error) {
     logStageError(
@@ -3358,6 +3229,185 @@ function safeBudgetInteger(
       )
     )
   );
+}
+
+/*
+ * ============================================
+ * Successful Chat Background Finalization
+ * ============================================
+ */
+
+async function finalizeSuccessfulChatInBackground({
+  requestId,
+  userId,
+  conversationId,
+  previousTitle,
+  newTitle,
+  assistantCreated,
+  assistantMessageId,
+  model,
+  responseTime,
+  openAIResponse,
+}: {
+  requestId:
+    string;
+
+  userId:
+    string;
+
+  conversationId:
+    string;
+
+  previousTitle:
+    string;
+
+  newTitle:
+    string;
+
+  assistantCreated:
+    string;
+
+  assistantMessageId:
+    string;
+
+  model:
+    string;
+
+  responseTime:
+    number;
+
+  openAIResponse:
+  OpenAI.Responses.Response;
+}) {
+  let pb:
+    PocketBase |
+    null =
+      null;
+
+  try {
+    pb =
+      await getPocketBaseServiceClient();
+  } catch (error) {
+    console.error(
+      "Chat background finalization service client failed",
+      {
+        requestId,
+
+        conversationId,
+
+        error:
+          getErrorMetadata(
+            error
+          ),
+      }
+    );
+  }
+
+  /*
+   * Conversation metadata is best-effort.
+   */
+  if (
+    pb
+  ) {
+    const updates:
+      Record<
+        string,
+        string
+      > = {};
+
+    if (
+      newTitle !==
+      previousTitle
+    ) {
+      updates.title =
+        newTitle;
+    }
+
+    if (
+      assistantCreated
+    ) {
+      updates.last_message_at =
+        assistantCreated;
+    }
+
+    if (
+      Object.keys(
+        updates
+      ).length >
+      0
+    ) {
+      try {
+        await pb
+          .collection(
+            "conversations"
+          )
+          .update(
+            conversationId,
+            updates
+          );
+      } catch (error) {
+        console.error(
+          "Chat background conversation update failed",
+          {
+            requestId,
+
+            conversationId,
+
+            error:
+              getErrorMetadata(
+                error
+              ),
+          }
+        );
+      }
+    }
+  }
+
+  /*
+   * Usage accounting remains idempotent because
+   * OpenAI response/request identifiers are passed.
+   */
+  const usageResult =
+    await recordAIUsageChecked(
+      requestId,
+      {
+        userId,
+
+        conversationId,
+
+        messageId:
+          assistantMessageId,
+
+        requestType:
+          "chat",
+
+        reservationRequestId:
+          requestId,
+
+        model,
+
+        latencyMs:
+          responseTime,
+
+        success:
+          true,
+
+        response:
+          openAIResponse,
+      }
+    );
+
+  if (
+    usageResult.ok
+  ) {
+    await completeChatBudgetReservationSafely({
+      requestId,
+
+      userId,
+
+      usageResult,
+    });
+  }
 }
 
 /*
