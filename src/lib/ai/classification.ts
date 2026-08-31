@@ -41,18 +41,6 @@ import {
 const MAX_TOPIC_CANDIDATES =
   100;
 
-const DEFAULT_CLASSIFIER_CANDIDATE_LIMIT =
-  32;
-
-const MIN_CLASSIFIER_CANDIDATE_LIMIT =
-  10;
-
-const MAX_CLASSIFIER_CANDIDATE_LIMIT =
-  60;
-
-const MIN_SHORTLIST_SIGNAL_SCORE =
-  8;
-
 const MAX_CONTEXT_MESSAGES =
   4;
 
@@ -426,27 +414,6 @@ export async function classifyUserMessage({
       };
     }
 
-    const classifierCandidates =
-      selectClassifierCandidates({
-        question:
-          cleanQuestion,
-
-        context,
-
-        candidates,
-      });
-
-    logClassifierShortlist({
-      total:
-        candidates.length,
-
-      selected:
-        classifierCandidates.length,
-
-      messageId:
-        cleanMessageId,
-    });
-
     /*
      * ========================================
      * Reservation-aware AI Budget Guard
@@ -464,7 +431,7 @@ export async function classifyUserMessage({
       buildClassifierInput(
         cleanQuestion,
         context,
-        classifierCandidates
+        candidates
       );
 
     const reservationInputTokens =
@@ -955,7 +922,7 @@ export async function classifyUserMessage({
 
     const candidateIds =
       new Set(
-        classifierCandidates.map(
+        candidates.map(
           (
             candidate
           ) =>
@@ -1426,21 +1393,11 @@ export async function previewTopicClassification({
    * ========================================
    */
 
-  const classifierCandidates =
-    selectClassifierCandidates({
-      question:
-        cleanQuestion,
-
-      context,
-
-      candidates,
-    });
-
   const classifierInput =
     buildClassifierInput(
       cleanQuestion,
       context,
-      classifierCandidates
+      candidates
     );
 
   /*
@@ -1508,7 +1465,7 @@ export async function previewTopicClassification({
 
   const candidateById =
     new Map(
-      classifierCandidates.map(
+      candidates.map(
         (
           candidate
         ) => [
@@ -1613,7 +1570,7 @@ export async function previewTopicClassification({
     latencyMs,
 
     candidateCount:
-      classifierCandidates.length,
+      candidates.length,
   };
 }
 
@@ -1968,318 +1925,6 @@ async function getActiveTopics(
         candidate !==
         null
     );
-}
-
-/*
- * ============================================
- * Candidate Shortlisting
- * ============================================
- */
-
-function selectClassifierCandidates({
-  question,
-  context,
-  candidates,
-}: {
-  question:
-    string;
-
-  context:
-    ClassificationContextMessage[];
-
-  candidates:
-    TopicCandidate[];
-}) {
-  const limit =
-    getClassifierCandidateLimit();
-
-  if (
-    candidates.length <=
-    limit
-  ) {
-    return candidates;
-  }
-
-  const query =
-    normalizeMatchingText(
-      [
-        question,
-        ...(
-          Array.isArray(context)
-            ? context
-                .slice(-2)
-                .map((message) => message.content)
-            : []
-        ),
-      ].join(" ")
-    );
-
-  if (!query) {
-    return candidates;
-  }
-
-  const queryTokens =
-    matchingTokens(query);
-
-  const scored =
-    candidates.map(
-      (candidate, index) => ({
-        candidate,
-        index,
-        score:
-          scoreClassifierCandidate(
-            candidate,
-            query,
-            queryTokens
-          ),
-      })
-    );
-
-  const strongest =
-    scored.reduce(
-      (maximum, item) =>
-        Math.max(
-          maximum,
-          item.score
-        ),
-      0
-    );
-
-  /*
-   * سؤال مبهم یا semantic-only:
-   * همه Candidateها حفظ می‌شوند.
-   */
-  if (
-    strongest <
-    MIN_SHORTLIST_SIGNAL_SCORE
-  ) {
-    return candidates;
-  }
-
-  return scored
-    .sort(
-      (left, right) =>
-        right.score -
-          left.score ||
-        left.index -
-          right.index
-    )
-    .slice(0, limit)
-    .map((item) => item.candidate);
-}
-
-function scoreClassifierCandidate(
-  candidate:
-    TopicCandidate,
-
-  query:
-    string,
-
-  queryTokens:
-    Set<string>
-) {
-  let score = 0;
-
-  score += scoreGuidanceText(
-    candidate.name,
-    query,
-    queryTokens,
-    { phrase: 28, token: 6 }
-  );
-
-  for (const keyword of candidate.keywords) {
-    score += scoreGuidanceText(
-      keyword,
-      query,
-      queryTokens,
-      { phrase: 20, token: 5 }
-    );
-  }
-
-  for (const example of candidate.examples) {
-    score += scoreGuidanceText(
-      example,
-      query,
-      queryTokens,
-      { phrase: 10, token: 2 }
-    );
-  }
-
-  if (candidate.description) {
-    score += scoreGuidanceText(
-      candidate.description,
-      query,
-      queryTokens,
-      { phrase: 6, token: 1.5 }
-    );
-  }
-
-  if (candidate.classificationNote) {
-    score += scoreGuidanceText(
-      candidate.classificationNote,
-      query,
-      queryTokens,
-      { phrase: 6, token: 1.5 }
-    );
-  }
-
-  /*
-   * negative_examples حذف‌کننده نیستند.
-   * Topicهای مرزی باید برای Reject صحیح مدل
-   * در Candidate set باقی بمانند.
-   */
-  for (
-    const negativeExample of
-    candidate.negativeExamples
-  ) {
-    score += scoreGuidanceText(
-      negativeExample,
-      query,
-      queryTokens,
-      { phrase: 4, token: 0.75 }
-    );
-  }
-
-  return Math.round(score * 100) / 100;
-}
-
-function scoreGuidanceText(
-  value:
-    string,
-
-  query:
-    string,
-
-  queryTokens:
-    Set<string>,
-
-  weights: {
-    phrase:
-      number;
-
-    token:
-      number;
-  }
-) {
-  const normalized =
-    normalizeMatchingText(value);
-
-  if (!normalized) {
-    return 0;
-  }
-
-  let score = 0;
-
-  if (
-    normalized.length >= 4 &&
-    query.includes(normalized)
-  ) {
-    score += weights.phrase;
-  }
-
-  const tokens =
-    matchingTokens(normalized);
-
-  let overlap = 0;
-
-  for (const token of tokens) {
-    if (queryTokens.has(token)) {
-      overlap += 1;
-    }
-  }
-
-  score +=
-    Math.min(4, overlap) *
-    weights.token;
-
-  return score;
-}
-
-function normalizeMatchingText(
-  value:
-    unknown
-) {
-  return String(value || "")
-    .replace(/ي/g, "ی")
-    .replace(/ك/g, "ک")
-    .replace(/ة/g, "ه")
-    .replace(/ۀ/g, "ه")
-    .replace(/[\u064B-\u065F\u0670]/g, "")
-    .replace(/\u200c/g, " ")
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function matchingTokens(
-  value:
-    string
-) {
-  return new Set(
-    value
-      .split(" ")
-      .map((token) => token.trim())
-      .filter((token) => token.length >= 2)
-  );
-}
-
-function getClassifierCandidateLimit() {
-  const value =
-    Number(
-      process.env
-        .TOPIC_CLASSIFIER_CANDIDATE_LIMIT
-    );
-
-  if (!Number.isInteger(value)) {
-    return DEFAULT_CLASSIFIER_CANDIDATE_LIMIT;
-  }
-
-  return Math.min(
-    MAX_CLASSIFIER_CANDIDATE_LIMIT,
-    Math.max(
-      MIN_CLASSIFIER_CANDIDATE_LIMIT,
-      value
-    )
-  );
-}
-
-function logClassifierShortlist({
-  total,
-  selected,
-  messageId,
-}: {
-  total:
-    number;
-
-  selected:
-    number;
-
-  messageId:
-    string;
-}) {
-  if (
-    process.env
-      .TOPIC_CLASSIFIER_SHORTLIST_LOG
-      ?.trim()
-      .toLowerCase() !==
-    "true"
-  ) {
-    return;
-  }
-
-  console.info(
-    "Topic classifier candidate shortlist",
-    {
-      messageId,
-      totalCandidates:
-        total,
-      selectedCandidates:
-        selected,
-      reduced:
-        selected < total,
-    }
-  );
 }
 
 /*
