@@ -1030,6 +1030,25 @@ export async function POST(
     const vectorStoreId =
       getOpenAIVectorStoreId();
 
+    /*
+     * ========================================
+     * Retrieval Scope Mode
+     *
+     * true  => Classification قبل از File Search
+     *          و Retrieval محدود به Topic
+     *
+     * false => Retrieval فقط روی published knowledge
+     *          و Classification بعد از Response
+     *          داخل after()
+     *
+     * Default عمداً true است تا Deploy به‌تنهایی
+     * رفتار Production را تغییر ندهد.
+     * ========================================
+     */
+
+    const topicScopedRetrievalEnabled =
+      isChatTopicScopedRetrievalEnabled();
+
     const preflightFileSearchFilter =
       buildChatFileSearchFilter(
         null
@@ -1318,104 +1337,78 @@ export async function POST(
 
     /*
      * ========================================
-     * Topic Classification Before Chat
+     * Topic Classification / Retrieval Scope
      *
-     * Topic باید قبل از File Search مشخص شود
-     * تا Retrieval بتواند فقط Knowledge همان
-     * Topic را جست‌وجو کند.
+     * Scoped Mode:
+     * Classification همچنان قبل از Retrieval
+     * اجرا می‌شود.
      *
-     * خود Classifier Budget Guard / Reservation /
-     * Usage Accounting مستقل دارد. خطای Classifier
-     * Chat را متوقف نمی‌کند و در آن حالت Retrieval
-     * عمومیِ published ادامه پیدا می‌کند.
+     * Fast Mode:
+     * Classification از Critical Path خارج
+     * می‌شود و پس از Response اجرا خواهد شد.
+     * File Search فقط status=published دارد.
      * ========================================
      */
-
-    setStage(
-      "request_lock"
-    );
-
-    try {
-      await refreshChatRequestLock({
-        userId:
-          account.id,
-
-        requestId,
-      });
-    } catch (error) {
-      logStageError(
-        requestId,
-        stage,
-        error,
-        {
-          operation:
-            "refresh_request_lock_before_classification",
-        }
-      );
-
-      return jsonError({
-        requestId,
-
-        status:
-          503,
-
-        code:
-          "CHAT_GUARD_UNAVAILABLE",
-
-        message:
-          "امکان حفظ وضعیت درخواست در حال حاضر وجود ندارد. دوباره تلاش کنید.",
-
-        userMessage:
-          persistedUserMessage,
-      });
-    }
 
     let classificationTopicId:
       string |
       null =
         null;
 
-    setStage(
-      "classification"
-    );
+    if (
+      topicScopedRetrievalEnabled
+    ) {
+      setStage(
+        "request_lock"
+      );
 
-    try {
-      const classification =
-        await classifyUserMessage({
-          question:
-            content,
-
-          context:
-            history,
-
+      try {
+        await refreshChatRequestLock({
           userId:
             account.id,
 
-          conversationId:
-            conversation.id,
-
-          messageId:
-            userMessage.id,
+          requestId,
         });
+      } catch (error) {
+        logStageError(
+          requestId,
+          stage,
+          error,
+          {
+            operation:
+              "refresh_request_lock_before_classification",
+          }
+        );
 
-      if (
-        classification.status ===
-          "classified" ||
-        classification.status ===
-          "skipped"
-      ) {
-        classificationTopicId =
-          classification.topicId;
+        return jsonError({
+          requestId,
+
+          status:
+            503,
+
+          code:
+            "CHAT_GUARD_UNAVAILABLE",
+
+          message:
+            "امکان حفظ وضعیت درخواست در حال حاضر وجود ندارد. دوباره تلاش کنید.",
+
+          userMessage:
+            persistedUserMessage,
+        });
       }
 
-      if (
-        classification.status ===
-        "error"
-      ) {
-        console.warn(
-          "Topic classification completed with error status; chat will use published-only retrieval",
-          {
-            requestId,
+      setStage(
+        "classification"
+      );
+
+      try {
+        const classification =
+          await classifyUserMessage({
+            question:
+              content,
+
+            context:
+              history,
 
             userId:
               account.id,
@@ -1425,71 +1418,113 @@ export async function POST(
 
             messageId:
               userMessage.id,
+          });
+
+        if (
+          classification.status ===
+            "classified" ||
+          classification.status ===
+            "skipped"
+        ) {
+          classificationTopicId =
+            classification.topicId;
+        }
+
+        if (
+          classification.status ===
+          "error"
+        ) {
+          console.warn(
+            "Topic classification completed with error status; chat will use published-only retrieval",
+            {
+              requestId,
+
+              userId:
+                account.id,
+
+              conversationId:
+                conversation.id,
+
+              messageId:
+                userMessage.id,
+            }
+          );
+        }
+      } catch (error) {
+        classificationTopicId =
+          null;
+
+        logStageError(
+          requestId,
+          stage,
+          error,
+          {
+            operation:
+              "classify_before_chat",
+
+            messageId:
+              userMessage.id,
           }
         );
       }
-    } catch (error) {
-      classificationTopicId =
-        null;
 
-      logStageError(
-        requestId,
-        stage,
-        error,
+      setStage(
+        "request_lock"
+      );
+
+      try {
+        await refreshChatRequestLock({
+          userId:
+            account.id,
+
+          requestId,
+        });
+      } catch (error) {
+        logStageError(
+          requestId,
+          stage,
+          error,
+          {
+            operation:
+              "refresh_request_lock_after_classification",
+          }
+        );
+
+        return jsonError({
+          requestId,
+
+          status:
+            503,
+
+          code:
+            "CHAT_GUARD_UNAVAILABLE",
+
+          message:
+            "امکان حفظ وضعیت درخواست در حال حاضر وجود ندارد. دوباره تلاش کنید.",
+
+          userMessage:
+            persistedUserMessage,
+        });
+      }
+    } else {
+      console.info(
+        "Chat fast retrieval mode enabled",
         {
-          operation:
-            "classify_before_chat",
+          requestId,
+
+          conversationId:
+            conversation.id,
 
           messageId:
             userMessage.id,
+
+          retrievalScope:
+            "published_only",
+
+          classification:
+            "background",
         }
       );
-    }
-
-    /*
-     * Classification ممکن است زمان‌بر باشد.
-     * بعد از آن Ownership/TTL Lock را دوباره
-     * تأیید می‌کنیم، قبل از اینکه Chat Budget
-     * نهایی و Reservation ایجاد شود.
-     */
-
-    setStage(
-      "request_lock"
-    );
-
-    try {
-      await refreshChatRequestLock({
-        userId:
-          account.id,
-
-        requestId,
-      });
-    } catch (error) {
-      logStageError(
-        requestId,
-        stage,
-        error,
-        {
-          operation:
-            "refresh_request_lock_after_classification",
-        }
-      );
-
-      return jsonError({
-        requestId,
-
-        status:
-          503,
-
-        code:
-          "CHAT_GUARD_UNAVAILABLE",
-
-        message:
-          "امکان حفظ وضعیت درخواست در حال حاضر وجود ندارد. دوباره تلاش کنید.",
-
-        userMessage:
-          persistedUserMessage,
-      });
     }
 
     /*
@@ -2903,6 +2938,26 @@ export async function POST(
 
         assistantMessageId:
           assistantMessage.id,
+
+        backgroundClassification:
+          topicScopedRetrievalEnabled
+            ? undefined
+            : {
+                question:
+                  content,
+
+                context:
+                  history,
+
+                userId:
+                  account.id,
+
+                conversationId:
+                  conversation.id,
+
+                messageId:
+                  userMessage.id,
+              },
       })
     );
 
@@ -3315,6 +3370,7 @@ async function runPostResponseTasks({
   requestId,
   userMessageId,
   assistantMessageId,
+  backgroundClassification,
 }: {
   requestId:
     string;
@@ -3324,7 +3380,89 @@ async function runPostResponseTasks({
 
   assistantMessageId:
     string;
+
+  backgroundClassification?: {
+    question:
+      string;
+
+    context:
+      ChatInputItem[];
+
+    userId:
+      string;
+
+    conversationId:
+      string;
+
+    messageId:
+      string;
+  };
 }) {
+  /*
+   * Classification قبل از Knowledge Gap انجام
+   * می‌شود تا Gap بتواند Topic ذخیره‌شده پیام را
+   * ببیند.
+   */
+
+  if (
+    backgroundClassification
+  ) {
+    try {
+      const classification =
+        await classifyUserMessage({
+          question:
+            backgroundClassification.question,
+
+          context:
+            backgroundClassification.context,
+
+          userId:
+            backgroundClassification.userId,
+
+          conversationId:
+            backgroundClassification.conversationId,
+
+          messageId:
+            backgroundClassification.messageId,
+        });
+
+      console.info(
+        "Background topic classification completed",
+        {
+          requestId,
+
+          conversationId:
+            backgroundClassification.conversationId,
+
+          messageId:
+            backgroundClassification.messageId,
+
+          status:
+            classification.status,
+
+          topicId:
+            classification.topicId,
+        }
+      );
+    } catch (error) {
+      console.error(
+        "Background topic classification failed",
+        {
+          requestId,
+
+          conversationId:
+            backgroundClassification.conversationId,
+
+          messageId:
+            backgroundClassification.messageId,
+
+          error:
+            getErrorMetadata(error),
+        }
+      );
+    }
+  }
+
   try {
     const result =
       await trackKnowledgeGap({
@@ -3756,6 +3894,37 @@ function getCurrentDateTimeContext() {
 
     gregorian,
   };
+}
+
+/*
+ * ============================================
+ * Topic-scoped Retrieval Feature Flag
+ *
+ * Default = true
+ * ============================================
+ */
+
+function isChatTopicScopedRetrievalEnabled() {
+  const value =
+    process.env
+      .CHAT_TOPIC_SCOPED_RETRIEVAL_ENABLED
+      ?.trim()
+      .toLowerCase();
+
+  if (
+    !value
+  ) {
+    return true;
+  }
+
+  return ![
+    "0",
+    "false",
+    "no",
+    "off",
+  ].includes(
+    value
+  );
 }
 
 /*
