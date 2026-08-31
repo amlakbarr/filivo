@@ -1533,89 +1533,115 @@ export async function POST(
      * ========================================
      * Final Topic-aware Chat Budget Guard
      *
-     * Preflight Guard قبل از Persist انجام شد.
-     * اما Classification خودش مصرف AI دارد؛
-     * بنابراین قبل از Chat Reservation باید
-     * Budget با Usage جدید و Filter نهایی دوباره
-     * بررسی شود.
+     * Scoped Mode:
+     * - Classification قبل از Chat اجرا شده.
+     * - Filter نهایی ممکن است تغییر کرده باشد.
+     * - مصرف Classification نیز به Budget اضافه
+     *   شده است.
+     * - پس Guard دوم لازم است.
+     *
+     * Fast Mode:
+     * - Classification هنوز اجرا نشده.
+     * - Filter همان published-only Preflight است.
+     * - Reservation estimate همان Preflight است.
+     * - بنابراین Guard دوم تکراری است.
      * ========================================
      */
 
     const fileSearchFilter =
-      buildChatFileSearchFilter(
-        classificationTopicId
-      );
+      topicScopedRetrievalEnabled
+        ? buildChatFileSearchFilter(
+            classificationTopicId
+          )
+        : preflightFileSearchFilter;
 
     const reservationInputTokens =
-      estimateChatReservationInputTokens({
-        model,
-
-        assistantInstructions,
-
-        input,
-
-        vectorStoreId,
-
-        maxResults:
-          retrievalSettings.maxResults,
-
-        minScore:
-          retrievalSettings.minScore,
-
-        fileSearchFilter,
-      });
-
-    setStage(
-      "budget_guard"
-    );
-
-    let finalBudgetGuard;
-
-    try {
-      finalBudgetGuard =
-        await checkAIBudgetGuard({
-          userId:
-            account.id,
-
-          reservation: {
+      topicScopedRetrievalEnabled
+        ? estimateChatReservationInputTokens({
             model,
 
-            inputTokens:
-              reservationInputTokens,
+            assistantInstructions,
 
-            outputTokens:
-              CHAT_MAX_OUTPUT_TOKENS,
-          },
+            input,
 
-          excludeReservationRequestId:
-            requestId,
-        });
-    } catch (error) {
-      logStageError(
-        requestId,
-        stage,
-        error,
-        {
-          operation:
-            "final_chat_budget_guard_after_classification",
-        }
+            vectorStoreId,
+
+            maxResults:
+              retrievalSettings.maxResults,
+
+            minScore:
+              retrievalSettings.minScore,
+
+            fileSearchFilter,
+          })
+        : preflightReservationInputTokens;
+
+    /*
+     * در Fast Mode از نتیجه همان Guard اولیه
+     * استفاده می‌کنیم.
+     */
+
+   let finalBudgetGuard:
+  Awaited<
+    ReturnType<
+      typeof checkAIBudgetGuard
+    >
+  > =
+    budgetGuard;
+
+    if (
+      topicScopedRetrievalEnabled
+    ) {
+      setStage(
+        "budget_guard"
       );
 
-      return jsonError({
-        requestId,
+      try {
+        finalBudgetGuard =
+          await checkAIBudgetGuard({
+            userId:
+              account.id,
 
-        status:
-          503,
+            reservation: {
+              model,
 
-        code:
-          "AI_BUDGET_GUARD_UNAVAILABLE",
+              inputTokens:
+                reservationInputTokens,
 
-        message:
-          "امکان بررسی سهمیه هوش مصنوعی در حال حاضر وجود ندارد. کمی بعد دوباره تلاش کنید.",
+              outputTokens:
+                CHAT_MAX_OUTPUT_TOKENS,
+            },
 
-        userMessage:
-          persistedUserMessage,
-      });
+            excludeReservationRequestId:
+              requestId,
+          });
+      } catch (error) {
+        logStageError(
+          requestId,
+          stage,
+          error,
+          {
+            operation:
+              "final_chat_budget_guard_after_classification",
+          }
+        );
+
+        return jsonError({
+          requestId,
+
+          status:
+            503,
+
+          code:
+            "AI_BUDGET_GUARD_UNAVAILABLE",
+
+          message:
+            "امکان بررسی سهمیه هوش مصنوعی در حال حاضر وجود ندارد. کمی بعد دوباره تلاش کنید.",
+
+          userMessage:
+            persistedUserMessage,
+        });
+      }
     }
 
     if (
@@ -1648,7 +1674,9 @@ export async function POST(
       0
     ) {
       console.warn(
-        "AI budget warning after topic classification",
+        topicScopedRetrievalEnabled
+          ? "AI budget warning after topic classification"
+          : "AI budget warning before chat",
         {
           requestId,
 
