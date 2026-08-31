@@ -1656,7 +1656,7 @@ function estimateClassificationReservationInputTokens(
 
       reasoning: {
         effort:
-          "minimal",
+          "none",
       },
 
       text: {
@@ -1716,7 +1716,7 @@ function createClassificationResponse(
 
       reasoning: {
         effort:
-          "minimal",
+          "none",
       },
 
       max_output_tokens:
