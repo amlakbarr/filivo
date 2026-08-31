@@ -10,6 +10,10 @@ import type {
 } from "pocketbase";
 
 import {
+  createChatLatencyProfiler,
+} from "@/lib/chat/latency-profiler";
+
+import {
   checkAIBudgetGuard,
   type AIBudgetLimitCode,
 } from "@/lib/ai/budget-guard";
@@ -208,6 +212,35 @@ export async function POST(
   let stage:
     ChatStage =
       "request";
+
+  /*
+   * ========================================
+   * Request Latency Profiling
+   *
+   * Stageهای موجود Chat Route را اندازه‌گیری
+   * می‌کند بدون اینکه Business Logic تغییر کند.
+   * ========================================
+   */
+
+  const latencyProfiler =
+    createChatLatencyProfiler({
+      requestId,
+
+      initialStage:
+        stage,
+    });
+
+  function setStage(
+    nextStage:
+      ChatStage
+  ) {
+    stage =
+      nextStage;
+
+    latencyProfiler.setStage(
+      nextStage
+    );
+  }
 
   let persistedUserMessage:
     | ChatMessage
@@ -454,8 +487,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "authentication";
+    setStage(
+      "authentication"
+    );
 
     const session =
       await getAuthenticatedPocketBase();
@@ -488,8 +522,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "service_client";
+    setStage(
+      "service_client"
+    );
 
     let pb:
       PocketBase;
@@ -524,8 +559,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "conversation";
+    setStage(
+      "conversation"
+    );
 
     let conversation:
       RecordModel;
@@ -614,8 +650,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "idempotency";
+    setStage(
+      "idempotency"
+    );
 
     try {
       const existingAssistant =
@@ -738,8 +775,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "request_lock";
+    setStage(
+      "request_lock"
+    );
 
     let lockResult;
 
@@ -804,8 +842,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "rate_limit";
+    setStage(
+      "rate_limit"
+    );
 
     let rateLimit;
 
@@ -885,8 +924,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "history";
+    setStage(
+      "history"
+    );
 
     let historyResult;
 
@@ -1015,8 +1055,9 @@ export async function POST(
           preflightFileSearchFilter,
       });
 
-    stage =
-      "budget_guard";
+    setStage(
+      "budget_guard"
+    );
 
     let budgetGuard;
 
@@ -1120,8 +1161,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "user_persistence";
+    setStage(
+      "user_persistence"
+    );
 
     let userMessage:
       RecordModel;
@@ -1289,8 +1331,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "request_lock";
+    setStage(
+      "request_lock"
+    );
 
     try {
       await refreshChatRequestLock({
@@ -1332,8 +1375,9 @@ export async function POST(
       null =
         null;
 
-    stage =
-      "classification";
+    setStage(
+      "classification"
+    );
 
     try {
       const classification =
@@ -1409,8 +1453,9 @@ export async function POST(
      * نهایی و Reservation ایجاد شود.
      */
 
-    stage =
-      "request_lock";
+    setStage(
+      "request_lock"
+    );
 
     try {
       await refreshChatRequestLock({
@@ -1483,8 +1528,9 @@ export async function POST(
         fileSearchFilter,
       });
 
-    stage =
-      "budget_guard";
+    setStage(
+      "budget_guard"
+    );
 
     let finalBudgetGuard;
 
@@ -1609,8 +1655,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "budget_reservation";
+    setStage(
+      "budget_reservation"
+    );
 
     const reservedTokens =
       safeBudgetInteger(
@@ -1756,8 +1803,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "request_lock";
+    setStage(
+      "request_lock"
+    );
 
     try {
       await refreshChatRequestLock({
@@ -1810,8 +1858,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "openai";
+    setStage(
+      "openai"
+    );
 
     const startedAt =
       Date.now();
@@ -2081,8 +2130,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "source_resolution";
+    setStage(
+      "source_resolution"
+    );
 
     let sources:
       ChatSource[];
@@ -2267,8 +2317,9 @@ export async function POST(
       hasAnswer &&
       grounding.requiresKnowledge
     ) {
-      stage =
-        "grounding_verification";
+      setStage(
+        "grounding_verification"
+      );
 
       const verification =
         await verifyGroundedAnswer({
@@ -2438,8 +2489,9 @@ export async function POST(
       | string
       | undefined;
 
-    stage =
-      "conversation_update";
+    setStage(
+      "conversation_update"
+    );
 
     if (
       newTitle !==
@@ -2482,8 +2534,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "assistant_persistence";
+    setStage(
+      "assistant_persistence"
+    );
 
     let assistantMessage:
       RecordModel;
@@ -2708,8 +2761,9 @@ export async function POST(
      * ========================================
      */
 
-    stage =
-      "conversation_update";
+    setStage(
+      "conversation_update"
+    );
 
     try {
       await pb
@@ -2921,6 +2975,10 @@ export async function POST(
       lockAcquired &&
       lockedUserId
     ) {
+      setStage(
+        "request_lock"
+      );
+
       try {
         await releaseChatRequestLock({
           userId:
@@ -2940,6 +2998,18 @@ export async function POST(
         );
       }
     }
+
+    latencyProfiler.finish({
+      finalStage:
+        stage,
+
+      lockAcquired,
+
+      hasPersistedUserMessage:
+        Boolean(
+          persistedUserMessage
+        ),
+    });
   }
 }
 
