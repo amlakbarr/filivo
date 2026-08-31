@@ -12,6 +12,8 @@ import {
   useRouter,
 } from "next/navigation";
 
+import MarkdownContent from "@/components/common/MarkdownContent";
+
 import {
   dispatchConversationUpdated,
 } from "@/lib/chat/conversation-events";
@@ -48,13 +50,28 @@ type SendMessageResponse = {
   };
 };
 
+type FeedbackReason =
+  | "incorrect"
+  | "incomplete"
+  | "outdated"
+  | "irrelevant"
+  | "unclear"
+  | "source_issue"
+  | "other";
+
+type FeedbackWithReasons =
+  ChatFeedback & {
+    reasons?:
+      FeedbackReason[];
+  };
+
 type FeedbackMutationResponse = {
   success?: boolean;
 
   message?: string;
 
   feedback?:
-    | ChatFeedback
+    | FeedbackWithReasons
     | null;
 };
 
@@ -65,9 +82,71 @@ type ConversationFeedbackResponse = {
 
   items?: Array<{
     messageId: string;
-    feedback: ChatFeedback;
+    feedback: FeedbackWithReasons;
   }>;
 };
+
+const MAX_FEEDBACK_REASONS =
+  3;
+
+const FEEDBACK_REASON_OPTIONS:
+  ReadonlyArray<{
+    value:
+      FeedbackReason;
+
+    label:
+      string;
+  }> = [
+    {
+      value:
+        "incorrect",
+
+      label:
+        "پاسخ اشتباه است",
+    },
+    {
+      value:
+        "incomplete",
+
+      label:
+        "پاسخ ناقص است",
+    },
+    {
+      value:
+        "outdated",
+
+      label:
+        "اطلاعات قدیمی است",
+    },
+    {
+      value:
+        "irrelevant",
+
+      label:
+        "پاسخ نامرتبط است",
+    },
+    {
+      value:
+        "unclear",
+
+      label:
+        "پاسخ مبهم است",
+    },
+    {
+      value:
+        "source_issue",
+
+      label:
+        "مشکل در منبع یا اطلاعات",
+    },
+    {
+      value:
+        "other",
+
+      label:
+        "مورد دیگر",
+    },
+  ];
 
 export default function ChatWindow({
   conversationId,
@@ -76,14 +155,6 @@ export default function ChatWindow({
 }: Props) {
   const router =
     useRouter();
-
-  const [
-    hydrated,
-    setHydrated,
-  ] =
-    useState(
-      false
-    );
 
   const [
     message,
@@ -159,6 +230,24 @@ export default function ChatWindow({
     >({});
 
   const [
+    feedbackNotices,
+    setFeedbackNotices,
+  ] =
+    useState<
+      Record<
+        string,
+        {
+          type:
+            | "success"
+            | "error";
+
+          text:
+            string;
+        }
+      >
+    >({});
+
+  const [
     commentDrafts,
     setCommentDrafts,
   ] =
@@ -169,6 +258,17 @@ export default function ChatWindow({
       >
     >({});
 
+  const [
+    reasonDrafts,
+    setReasonDrafts,
+  ] =
+    useState<
+      Record<
+        string,
+        FeedbackReason[]
+      >
+    >({});
+
   const pendingMessageRef =
     useRef<{
       content: string;
@@ -176,23 +276,6 @@ export default function ChatWindow({
     } | null>(
       null
     );
-
-  /*
-   * ==========================================
-   * Client Hydration
-   *
-   * During SSR and the first client render,
-   * interactive disabled attributes are omitted.
-   * After hydration React can safely apply the
-   * real disabled state.
-   * ==========================================
-   */
-
-  useEffect(() => {
-    setHydrated(
-      true
-    );
-  }, []);
 
   /*
    * ==========================================
@@ -250,7 +333,7 @@ export default function ChatWindow({
         const feedbackByMessage =
           new Map<
             string,
-            ChatFeedback
+            FeedbackWithReasons
           >();
 
         for (
@@ -297,6 +380,11 @@ export default function ChatWindow({
           string
         > = {};
 
+        const reasons: Record<
+          string,
+          FeedbackReason[]
+        > = {};
+
         for (
           const item of
           data.items || []
@@ -312,6 +400,13 @@ export default function ChatWindow({
               item.feedback
                 .comment ||
               "";
+
+            reasons[
+              item.messageId
+            ] =
+              getFeedbackReasons(
+                item.feedback
+              );
           }
         }
 
@@ -321,6 +416,15 @@ export default function ChatWindow({
           ) => ({
             ...current,
             ...drafts,
+          })
+        );
+
+        setReasonDrafts(
+          (
+            current
+          ) => ({
+            ...current,
+            ...reasons,
           })
         );
       } catch (
@@ -600,6 +704,10 @@ export default function ChatWindow({
       })
     );
 
+    clearFeedbackNotice(
+      chatMessage.id
+    );
+
     /*
      * اگر کاربر روی رأی فعلی
      * دوباره کلیک کرد → حذف.
@@ -621,6 +729,14 @@ export default function ChatWindow({
       chatMessage.id
     );
 
+    const currentReasons =
+      reasonDrafts[
+        chatMessage.id
+      ] ||
+      getFeedbackReasons(
+        chatMessage.feedback
+      );
+
     try {
       const response =
         await fetch(
@@ -637,6 +753,12 @@ export default function ChatWindow({
             body:
               JSON.stringify({
                 rating,
+
+                reasons:
+                  rating ===
+                  "down"
+                    ? currentReasons
+                    : [],
 
                 /*
                  * هنگام تغییر رأی به down
@@ -667,6 +789,10 @@ export default function ChatWindow({
         !data.success ||
         !data.feedback
       ) {
+        const message =
+          data.message ||
+          "ثبت بازخورد انجام نشد.";
+
         setFeedbackErrors(
           (
             current
@@ -676,9 +802,14 @@ export default function ChatWindow({
             [
               chatMessage.id
             ]:
-              data.message ||
-              "ثبت بازخورد انجام نشد.",
+              message,
           })
+        );
+
+        setFeedbackNotice(
+          chatMessage.id,
+          "error",
+          message
         );
 
         return;
@@ -687,6 +818,15 @@ export default function ChatWindow({
       updateMessageFeedback(
         chatMessage.id,
         data.feedback
+      );
+
+      setFeedbackNotice(
+        chatMessage.id,
+        "success",
+        data.feedback.rating ===
+          "down"
+          ? "بازخورد منفی ثبت شد. در صورت نیاز جزئیات آن را تکمیل کنید."
+          : "بازخورد مثبت با موفقیت ثبت شد."
       );
 
       if (
@@ -708,8 +848,8 @@ export default function ChatWindow({
               "",
           })
         );
-      } else {
-        setCommentDrafts(
+
+        setReasonDrafts(
           (
             current
           ) => ({
@@ -718,11 +858,20 @@ export default function ChatWindow({
             [
               chatMessage.id
             ]:
-              "",
+              getFeedbackReasons(
+                data.feedback
+              ),
           })
+        );
+      } else {
+        clearFeedbackDrafts(
+          chatMessage.id
         );
       }
     } catch {
+      const message =
+        "خطا در ارتباط با سرور.";
+
       setFeedbackErrors(
         (
           current
@@ -732,8 +881,14 @@ export default function ChatWindow({
           [
             chatMessage.id
           ]:
-            "خطا در ارتباط با سرور.",
+            message,
         })
+      );
+
+      setFeedbackNotice(
+        chatMessage.id,
+        "error",
+        message
       );
     } finally {
       setFeedbackBusyMessageId(
@@ -768,6 +923,10 @@ export default function ChatWindow({
       })
     );
 
+    clearFeedbackNotice(
+      messageId
+    );
+
     try {
       const response =
         await fetch(
@@ -789,6 +948,10 @@ export default function ChatWindow({
         !response.ok ||
         !data.success
       ) {
+        const message =
+          data.message ||
+          "حذف بازخورد انجام نشد.";
+
         setFeedbackErrors(
           (
             current
@@ -798,9 +961,14 @@ export default function ChatWindow({
             [
               messageId
             ]:
-              data.message ||
-              "حذف بازخورد انجام نشد.",
+              message,
           })
+        );
+
+        setFeedbackNotice(
+          messageId,
+          "error",
+          message
         );
 
         return;
@@ -811,19 +979,19 @@ export default function ChatWindow({
         null
       );
 
-      setCommentDrafts(
-        (
-          current
-        ) => ({
-          ...current,
+      clearFeedbackDrafts(
+        messageId
+      );
 
-          [
-            messageId
-          ]:
-            "",
-        })
+      setFeedbackNotice(
+        messageId,
+        "success",
+        "بازخورد این پاسخ حذف شد."
       );
     } catch {
+      const message =
+        "خطا در ارتباط با سرور.";
+
       setFeedbackErrors(
         (
           current
@@ -833,8 +1001,14 @@ export default function ChatWindow({
           [
             messageId
           ]:
-            "خطا در ارتباط با سرور.",
+            message,
         })
+      );
+
+      setFeedbackNotice(
+        messageId,
+        "error",
+        message
       );
     } finally {
       setFeedbackBusyMessageId(
@@ -843,8 +1017,83 @@ export default function ChatWindow({
     }
   }
 
-  async function saveFeedbackComment(
-    messageId: string
+  function toggleFeedbackReason(
+    messageId:
+      string,
+
+    reason:
+      FeedbackReason
+  ) {
+    if (
+      feedbackBusyMessageId ===
+      messageId
+    ) {
+      return;
+    }
+
+    setReasonDrafts(
+      (
+        current
+      ) => {
+        const existing =
+          current[
+            messageId
+          ] ||
+          getFeedbackReasons(
+            messages.find(
+              (
+                item
+              ) =>
+                item.id ===
+                messageId
+            )?.feedback
+          );
+
+        if (
+          existing.includes(
+            reason
+          )
+        ) {
+          return {
+            ...current,
+
+            [
+              messageId
+            ]:
+              existing.filter(
+                (
+                  item
+                ) =>
+                  item !==
+                  reason
+              ),
+          };
+        }
+
+        if (
+          existing.length >=
+          MAX_FEEDBACK_REASONS
+        ) {
+          return current;
+        }
+
+        return {
+          ...current,
+
+          [
+            messageId
+          ]: [
+            ...existing,
+            reason,
+          ],
+        };
+      }
+    );
+  }
+
+  async function saveFeedbackDetails(
+    messageId:
+      string
   ) {
     if (
       feedbackBusyMessageId
@@ -885,6 +1134,19 @@ export default function ChatWindow({
           1000
         );
 
+    const reasons =
+      (
+        reasonDrafts[
+          messageId
+        ] ||
+        getFeedbackReasons(
+          chatMessage.feedback
+        )
+      ).slice(
+        0,
+        MAX_FEEDBACK_REASONS
+      );
+
     setFeedbackBusyMessageId(
       messageId
     );
@@ -900,6 +1162,10 @@ export default function ChatWindow({
         ]:
           "",
       })
+    );
+
+    clearFeedbackNotice(
+      messageId
     );
 
     try {
@@ -920,6 +1186,8 @@ export default function ChatWindow({
                 rating:
                   "down",
 
+                reasons,
+
                 comment,
               }),
           }
@@ -937,6 +1205,10 @@ export default function ChatWindow({
         !data.success ||
         !data.feedback
       ) {
+        const message =
+          data.message ||
+          "ذخیره جزئیات بازخورد انجام نشد.";
+
         setFeedbackErrors(
           (
             current
@@ -946,9 +1218,14 @@ export default function ChatWindow({
             [
               messageId
             ]:
-              data.message ||
-              "ذخیره توضیح انجام نشد.",
+              message,
           })
+        );
+
+        setFeedbackNotice(
+          messageId,
+          "error",
+          message
         );
 
         return;
@@ -958,7 +1235,46 @@ export default function ChatWindow({
         messageId,
         data.feedback
       );
+
+      setCommentDrafts(
+        (
+          current
+        ) => ({
+          ...current,
+
+          [
+            messageId
+          ]:
+            data.feedback
+              ?.comment ||
+            "",
+        })
+      );
+
+      setReasonDrafts(
+        (
+          current
+        ) => ({
+          ...current,
+
+          [
+            messageId
+          ]:
+            getFeedbackReasons(
+              data.feedback
+            ),
+        })
+      );
+
+      setFeedbackNotice(
+        messageId,
+        "success",
+        "جزئیات بازخورد با موفقیت ثبت شد."
+      );
     } catch {
+      const message =
+        "خطا در ارتباط با سرور.";
+
       setFeedbackErrors(
         (
           current
@@ -968,8 +1284,14 @@ export default function ChatWindow({
           [
             messageId
           ]:
-            "خطا در ارتباط با سرور.",
+            message,
         })
+      );
+
+      setFeedbackNotice(
+        messageId,
+        "error",
+        message
       );
     } finally {
       setFeedbackBusyMessageId(
@@ -978,10 +1300,89 @@ export default function ChatWindow({
     }
   }
 
+  function setFeedbackNotice(
+    messageId:
+      string,
+
+    type:
+      | "success"
+      | "error",
+
+    text:
+      string
+  ) {
+    setFeedbackNotices(
+      (
+        current
+      ) => ({
+        ...current,
+
+        [
+          messageId
+        ]: {
+          type,
+          text,
+        },
+      })
+    );
+  }
+
+  function clearFeedbackNotice(
+    messageId:
+      string
+  ) {
+    setFeedbackNotices(
+      (
+        current
+      ) => {
+        const next = {
+          ...current,
+        };
+
+        delete next[
+          messageId
+        ];
+
+        return next;
+      }
+    );
+  }
+
+  function clearFeedbackDrafts(
+    messageId:
+      string
+  ) {
+    setCommentDrafts(
+      (
+        current
+      ) => ({
+        ...current,
+
+        [
+          messageId
+        ]:
+          "",
+      })
+    );
+
+    setReasonDrafts(
+      (
+        current
+      ) => ({
+        ...current,
+
+        [
+          messageId
+        ]:
+          [],
+      })
+    );
+  }
+
   function updateMessageFeedback(
     messageId: string,
     feedback:
-      | ChatFeedback
+      | FeedbackWithReasons
       | null
   ) {
     setMessages(
@@ -1098,7 +1499,17 @@ export default function ChatWindow({
               {messages.map(
                 (
                   item
-                ) => (
+                ) => {
+
+                  const selectedReasons =
+                    reasonDrafts[
+                      item.id
+                    ] ||
+                    getFeedbackReasons(
+                      item.feedback
+                    );
+
+                  return (
 
                   <div
                     key={
@@ -1124,7 +1535,7 @@ export default function ChatWindow({
                       {/* Bubble */}
 
                       <div
-                        className={`whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-7 ${
+                        className={`rounded-2xl px-4 py-3 text-sm leading-7 ${
                           item.role ===
                           "user"
                             ? "bg-black text-white"
@@ -1132,11 +1543,20 @@ export default function ChatWindow({
                         }`}
                       >
 
-                        <div>
-                          {
-                            item.content
-                          }
-                        </div>
+                        {item.role ===
+                        "assistant" ? (
+                          <MarkdownContent
+                            content={
+                              item.content
+                            }
+                          />
+                        ) : (
+                          <div className="whitespace-pre-wrap">
+                            {
+                              item.content
+                            }
+                          </div>
+                        )}
 
                         {/* Sources */}
 
@@ -1186,11 +1606,27 @@ export default function ChatWindow({
 
                         <div className="mt-2 px-1">
 
-                          <div className="flex items-center gap-1">
+                          <div className="flex flex-wrap items-center gap-1">
 
                             <span className="ml-1 text-[11px] text-gray-400">
                               آیا این پاسخ مفید بود؟
                             </span>
+
+                            {item.feedback && (
+                              <span
+                                className={`mr-1 rounded-full border px-2.5 py-1 text-[10px] font-bold ${
+                                  item.feedback.rating ===
+                                  "down"
+                                    ? "border-rose-200 bg-rose-50 text-rose-700"
+                                    : "border-emerald-200 bg-emerald-50 text-emerald-700"
+                                }`}
+                              >
+                                {item.feedback.rating ===
+                                "down"
+                                  ? "بازخورد منفی ثبت شده"
+                                  : "بازخورد مثبت ثبت شده"}
+                              </span>
+                            )}
 
                             <button
                               type="button"
@@ -1201,11 +1637,9 @@ export default function ChatWindow({
                                 "up"
                               }
                               disabled={
-                                hydrated
-                                  ? feedbackLoading ||
-                                    feedbackBusyMessageId ===
-                                      item.id
-                                  : undefined
+                                feedbackLoading ||
+                                feedbackBusyMessageId ===
+                                  item.id
                               }
                               onClick={() =>
                                 void selectFeedback(
@@ -1233,11 +1667,9 @@ export default function ChatWindow({
                                 "down"
                               }
                               disabled={
-                                hydrated
-                                  ? feedbackLoading ||
-                                    feedbackBusyMessageId ===
-                                      item.id
-                                  : undefined
+                                feedbackLoading ||
+                                feedbackBusyMessageId ===
+                                  item.id
                               }
                               onClick={() =>
                                 void selectFeedback(
@@ -1258,7 +1690,7 @@ export default function ChatWindow({
 
                           </div>
 
-                          {/* Negative comment */}
+                          {/* Negative feedback details */}
 
                           {item.feedback
                             ?.rating ===
@@ -1266,11 +1698,85 @@ export default function ChatWindow({
 
                             <div className="mt-2 rounded-xl border border-gray-200 bg-white p-3">
 
+                              <div>
+
+                                <p className="text-xs font-medium text-gray-700">
+                                  چه مشکلی در پاسخ وجود داشت؟
+                                </p>
+
+                                <p className="mt-1 text-[11px] text-gray-400">
+                                  حداکثر ۳ مورد را انتخاب کنید.
+                                </p>
+
+                                <div className="mt-2 flex flex-wrap gap-2">
+
+                                  {FEEDBACK_REASON_OPTIONS.map(
+                                    (
+                                      option
+                                    ) => {
+                                      const selected =
+                                        selectedReasons.includes(
+                                          option.value
+                                        );
+
+                                      const limitReached =
+                                        selectedReasons.length >=
+                                          MAX_FEEDBACK_REASONS;
+
+                                      return (
+                                        <button
+                                          key={
+                                            option.value
+                                          }
+                                          type="button"
+                                          aria-pressed={
+                                            selected
+                                          }
+                                          disabled={
+                                            feedbackBusyMessageId ===
+                                              item.id ||
+                                            (
+                                              !selected &&
+                                              limitReached
+                                            )
+                                          }
+                                          onClick={() =>
+                                            toggleFeedbackReason(
+                                              item.id,
+                                              option.value
+                                            )
+                                          }
+                                          className={`rounded-full border px-3 py-1.5 text-[11px] transition ${
+                                            selected
+                                              ? "border-rose-300 bg-rose-50 text-rose-700"
+                                              : "border-gray-200 bg-white text-gray-600 hover:border-gray-300 hover:bg-gray-50"
+                                          } disabled:cursor-not-allowed disabled:opacity-40`}
+                                        >
+                                          {
+                                            option.label
+                                          }
+                                        </button>
+                                      );
+                                    }
+                                  )}
+
+                                </div>
+
+                                <p className="mt-2 text-[10px] text-gray-400">
+                                  {selectedReasons.length.toLocaleString(
+                                    "fa-IR"
+                                  )}
+                                  {" "}
+                                  / ۳ انتخاب شده
+                                </p>
+
+                              </div>
+
                               <label
                                 htmlFor={`feedback-comment-${item.id}`}
-                                className="text-xs font-medium text-gray-600"
+                                className="mt-4 block text-xs font-medium text-gray-600"
                               >
-                                چه مشکلی در پاسخ وجود داشت؟
+                                توضیح بیشتر
                                 <span className="mr-1 font-normal text-gray-400">
                                   (اختیاری)
                                 </span>
@@ -1313,7 +1819,7 @@ export default function ChatWindow({
                                   feedbackBusyMessageId ===
                                   item.id
                                 }
-                                placeholder="مثلاً پاسخ ناقص بود یا منبع مناسب نبود..."
+                                placeholder="اگر لازم است جزئیات بیشتری بنویسید..."
                                 className="mt-2 w-full resize-none rounded-lg border border-gray-200 px-3 py-2 text-xs leading-6 outline-none transition focus:border-gray-400 disabled:opacity-50"
                               />
 
@@ -1339,13 +1845,13 @@ export default function ChatWindow({
                                     item.id
                                   }
                                   onClick={() =>
-                                    void saveFeedbackComment(
+                                    void saveFeedbackDetails(
                                       item.id
                                     )
                                   }
                                   className="rounded-lg bg-gray-900 px-3 py-1.5 text-xs font-medium text-white transition hover:bg-black disabled:opacity-50"
                                 >
-                                  ثبت توضیح
+                                  ثبت جزئیات بازخورد
                                 </button>
 
                               </div>
@@ -1354,19 +1860,56 @@ export default function ChatWindow({
 
                           )}
 
-                          {/* Feedback error */}
+                          {/* Feedback notification */}
 
-                          {feedbackErrors[
+                          {feedbackNotices[
                             item.id
                           ] && (
 
-                            <p className="mt-2 text-xs text-red-600">
+                            <div
+                              role={
+                                feedbackNotices[
+                                  item.id
+                                ].type ===
+                                "error"
+                                  ? "alert"
+                                  : "status"
+                              }
+                              className={`mt-2 rounded-xl border px-3 py-2.5 text-xs font-medium leading-6 ${
+                                feedbackNotices[
+                                  item.id
+                                ].type ===
+                                "success"
+                                  ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+                                  : "border-rose-200 bg-rose-50 text-rose-700"
+                              }`}
+                            >
+                              {
+                                feedbackNotices[
+                                  item.id
+                                ].text
+                              }
+                            </div>
+
+                          )}
+
+                          {!feedbackNotices[
+                            item.id
+                          ] &&
+                            feedbackErrors[
+                              item.id
+                            ] && (
+
+                            <div
+                              role="alert"
+                              className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2.5 text-xs font-medium leading-6 text-rose-700"
+                            >
                               {
                                 feedbackErrors[
                                   item.id
                                 ]
                               }
-                            </p>
+                            </div>
 
                           )}
 
@@ -1378,7 +1921,8 @@ export default function ChatWindow({
 
                   </div>
 
-                )
+                  );
+                }
               )}
 
               {sending && (
@@ -1470,9 +2014,7 @@ export default function ChatWindow({
                 4000
               }
               disabled={
-                hydrated
-                  ? sending
-                  : undefined
+                sending
               }
               className="max-h-40 min-h-14 w-full resize-none bg-transparent px-3 py-2 text-sm leading-7 outline-none disabled:opacity-60"
             />
@@ -1488,10 +2030,8 @@ export default function ChatWindow({
               <button
                 type="submit"
                 disabled={
-                  hydrated
-                    ? sending ||
-                      !message.trim()
-                    : undefined
+                  sending ||
+                  !message.trim()
                 }
                 className="rounded-xl bg-black px-5 py-2 text-sm font-medium text-white transition hover:bg-gray-800 disabled:cursor-not-allowed disabled:opacity-30"
               >
@@ -1517,6 +2057,93 @@ export default function ChatWindow({
  * Helpers
  * ============================================
  */
+
+function getFeedbackReasons(
+  feedback:
+    | ChatFeedback
+    | FeedbackWithReasons
+    | null
+    | undefined
+): FeedbackReason[] {
+  if (
+    !feedback ||
+    typeof feedback !==
+      "object"
+  ) {
+    return [];
+  }
+
+  const value =
+    (
+      feedback as {
+        reasons?:
+          unknown;
+      }
+    ).reasons;
+
+  if (
+    !Array.isArray(
+      value
+    )
+  ) {
+    return [];
+  }
+
+  const result:
+    FeedbackReason[] =
+    [];
+
+  for (
+    const item of
+    value
+  ) {
+    if (
+      !isFeedbackReason(
+        item
+      ) ||
+      result.includes(
+        item
+      )
+    ) {
+      continue;
+    }
+
+    result.push(
+      item
+    );
+
+    if (
+      result.length >=
+      MAX_FEEDBACK_REASONS
+    ) {
+      break;
+    }
+  }
+
+  return result;
+}
+
+function isFeedbackReason(
+  value:
+    unknown
+): value is FeedbackReason {
+  return (
+    value ===
+      "incorrect" ||
+    value ===
+      "incomplete" ||
+    value ===
+      "outdated" ||
+    value ===
+      "irrelevant" ||
+    value ===
+      "unclear" ||
+    value ===
+      "source_issue" ||
+    value ===
+      "other"
+  );
+}
 
 function withRequestId(
   message: string,

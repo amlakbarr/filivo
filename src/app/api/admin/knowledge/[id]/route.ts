@@ -1,4 +1,12 @@
+import {
+  after,
+} from "next/server";
+
 import type PocketBase from "pocketbase";
+
+import {
+  consumeAdminRateLimit,
+} from "@/lib/admin/rate-limit";
 
 import {
   removeKnowledgeItemFromOpenAI,
@@ -7,8 +15,8 @@ import {
 } from "@/lib/ai/knowledge";
 
 import {
-  consumeAdminRateLimit,
-} from "@/lib/admin/rate-limit";
+  runKnowledgeTriggeredEvals,
+} from "@/lib/ai/knowledge-eval-trigger";
 
 import {
   recordAuditLog,
@@ -37,66 +45,31 @@ import {
   getPocketBaseServiceClient,
 } from "@/lib/pocketbase/service";
 
-/*
- * ============================================
- * Types
- * ============================================
- */
-
 type Context = {
-  params: Promise<{
-    id: string;
-  }>;
+  params:
+    Promise<{
+      id:
+        string;
+    }>;
 };
-
-type AllowedRateLimit = {
-  allowed:
-    true;
-
-  limit:
-    number;
-
-  remaining:
-    number;
-
-  resetAt:
-    string;
-};
-
-/*
- * ============================================
- * Validation
- * ============================================
- */
-
-const RECORD_ID_PATTERN =
-  /^[a-zA-Z0-9_-]{1,64}$/;
 
 /*
  * ============================================
  * GET
- *
- * Read Knowledge Item
- *
- * Read-only:
- * Mutation Rate Limit روی GET اعمال نمی‌شود.
  * ============================================
  */
 
 export async function GET(
-  _request: Request,
+  _request:
+    Request,
+
   {
     params,
-  }: Context
+  }:
+    Context
 ) {
   const requestId =
     crypto.randomUUID();
-
-  /*
-   * ==========================================
-   * Admin Authorization
-   * ==========================================
-   */
 
   const admin =
     await getAdminSession();
@@ -112,15 +85,11 @@ export async function GET(
     );
   }
 
-  /*
-   * ==========================================
-   * Knowledge ID
-   * ==========================================
-   */
-
   const {
-    id: rawId,
-  } = await params;
+    id:
+      rawId,
+  } =
+    await params;
 
   const id =
     cleanRecordId(
@@ -137,12 +106,6 @@ export async function GET(
       "شناسه مطلب معتبر نیست."
     );
   }
-
-  /*
-   * ==========================================
-   * Service Client
-   * ==========================================
-   */
 
   let pb:
     PocketBase;
@@ -176,12 +139,6 @@ export async function GET(
       "سرویس پایگاه دانش موقتاً در دسترس نیست."
     );
   }
-
-  /*
-   * ==========================================
-   * Load Item
-   * ==========================================
-   */
 
   try {
     const item =
@@ -223,19 +180,17 @@ export async function GET(
  * PATCH
  *
  * Update Knowledge Item
- *
- * Rate Limit:
- *
- * knowledge.update
- * 20 requests / minute / admin
  * ============================================
  */
 
 export async function PATCH(
-  request: Request,
+  request:
+    Request,
+
   {
     params,
-  }: Context
+  }:
+    Context
 ) {
   const requestId =
     crypto.randomUUID();
@@ -267,8 +222,10 @@ export async function PATCH(
    */
 
   const {
-    id: rawId,
-  } = await params;
+    id:
+      rawId,
+  } =
+    await params;
 
   const id =
     cleanRecordId(
@@ -288,16 +245,7 @@ export async function PATCH(
 
   /*
    * ==========================================
-   * Admin Rate Limit
-   *
-   * knowledge.update
-   * 20 requests / minute / admin
-   *
-   * Target Knowledge ID بخشی از Bucket نیست.
-   *
-   * Fail-closed:
-   * اگر Rate Limiter در دسترس نباشد هیچ
-   * Mutation یا OpenAI Sync انجام نمی‌شود.
+   * Rate Limit
    * ==========================================
    */
 
@@ -346,25 +294,56 @@ export async function PATCH(
     );
   }
 
-  /*
-   * ==========================================
-   * Rate Limited
-   * ==========================================
-   */
-
   if (
     !rateLimit.allowed
   ) {
-    return rateLimitedResponse(
-      requestId,
-      rateLimit,
-      "تعداد درخواست‌های بروزرسانی مطالب بیش از حد مجاز است."
-    );
-  }
+    const response =
+      knowledgeApiError(
+        requestId,
+        429,
+        "ADMIN_RATE_LIMITED",
+        "تعداد درخواست‌های ویرایش مطلب بیش از حد مجاز است.",
+        {
+          retryAfterSeconds:
+            rateLimit.retryAfterSeconds,
 
-  const allowedRateLimit:
-    AllowedRateLimit =
-    rateLimit;
+          limit:
+            rateLimit.limit,
+
+          remaining:
+            rateLimit.remaining,
+
+          resetAt:
+            rateLimit.resetAt,
+        }
+      );
+
+    response.headers.set(
+      "Retry-After",
+      String(
+        rateLimit.retryAfterSeconds
+      )
+    );
+
+    response.headers.set(
+      "X-RateLimit-Limit",
+      String(
+        rateLimit.limit
+      )
+    );
+
+    response.headers.set(
+      "X-RateLimit-Remaining",
+      "0"
+    );
+
+    response.headers.set(
+      "X-RateLimit-Reset",
+      rateLimit.resetAt
+    );
+
+    return response;
+  }
 
   const respond =
     <TResponse extends Response>(
@@ -373,7 +352,7 @@ export async function PATCH(
     ) =>
       withRateLimitHeaders(
         response,
-        allowedRateLimit
+        rateLimit
       );
 
   /*
@@ -406,6 +385,32 @@ export async function PATCH(
           ),
       }
     );
+
+    await safeAudit({
+      request,
+
+      requestId,
+
+      actorId:
+        admin.account.id,
+
+      action:
+        "knowledge.update",
+
+      result:
+        "failure",
+
+      entityId:
+        id,
+
+      errorCode:
+        "KNOWLEDGE_SERVICE_UNAVAILABLE",
+
+      metadata: {
+        stage:
+          "service_client",
+      },
+    });
 
     return respond(
       knowledgeApiError(
@@ -445,13 +450,15 @@ export async function PATCH(
   }
 
   const previousStatus =
-    normalizeStatusText(
-      existing.status
+    String(
+      existing.status ||
+        ""
     );
 
   const previousSyncStatus =
-    normalizeSyncStatus(
-      existing.sync_status
+    String(
+      existing.sync_status ||
+        ""
     );
 
   const previousVersion =
@@ -466,12 +473,6 @@ export async function PATCH(
       200
     );
 
-  /*
-   * ==========================================
-   * Existing Attachment
-   * ==========================================
-   */
-
   const existingAttachment =
     Array.isArray(
       existing.attachment
@@ -480,15 +481,15 @@ export async function PATCH(
           existing
             .attachment[0] ||
             ""
-        ).trim()
+        )
       : String(
           existing.attachment ||
             ""
-        ).trim();
+        );
 
   /*
    * ==========================================
-   * Parse Request
+   * Parse
    * ==========================================
    */
 
@@ -611,9 +612,9 @@ export async function PATCH(
       "published" &&
     (
       contentChanged ||
-      previousStatus !==
+      existing.status !==
         "published" ||
-      previousSyncStatus !==
+      existing.sync_status !==
         "synced"
     );
 
@@ -636,12 +637,6 @@ export async function PATCH(
     parsed.data.status ===
       "draft";
 
-  /*
-   * ==========================================
-   * State
-   * ==========================================
-   */
-
   let updateCompleted =
     false;
 
@@ -650,11 +645,6 @@ export async function PATCH(
 
   let removeAuditWritten =
     false;
-
-  let updatedRecord:
-    KnowledgeItemRecord |
-    null =
-    null;
 
   try {
     /*
@@ -677,7 +667,13 @@ export async function PATCH(
             shouldSync ||
             shouldRemove
               ? "pending"
-              : previousSyncStatus,
+              : String(
+                  existing.sync_status ||
+                    "pending"
+                ) as
+                  | "pending"
+                  | "synced"
+                  | "error",
 
           clearAttachment:
             parsed.data
@@ -695,15 +691,14 @@ export async function PATCH(
      * ========================================
      */
 
-    updatedRecord =
-      await pb
-        .collection(
-          "knowledge_items"
-        )
-        .update<KnowledgeItemRecord>(
-          id,
-          payload
-        );
+    await pb
+      .collection(
+        "knowledge_items"
+      )
+      .update(
+        id,
+        payload
+      );
 
     updateCompleted =
       true;
@@ -765,7 +760,7 @@ export async function PATCH(
 
     /*
      * ========================================
-     * Audit: Publish
+     * Audit: Publish / Unpublish
      * ========================================
      */
 
@@ -808,12 +803,6 @@ export async function PATCH(
       });
     }
 
-    /*
-     * ========================================
-     * Audit: Unpublish
-     * ========================================
-     */
-
     if (
       isUnpublishing
     ) {
@@ -847,6 +836,8 @@ export async function PATCH(
 
           new_status:
             "draft",
+
+          version,
         },
       });
     }
@@ -1057,10 +1048,64 @@ export async function PATCH(
 
     /*
      * ========================================
-     * Reload Expanded Item
+     * Automatic Golden Tests
      *
-     * Reload failure نباید Mutation موفق را
-     * Failure نشان دهد.
+     * فقط وقتی Sync واقعی انجام شده و موفق است.
+     * Draft/Remove تست خودکار اجرا نمی‌کند.
+     * ========================================
+     */
+
+    if (
+      shouldSync &&
+      sync?.success ===
+        true
+    ) {
+      const knowledgeId =
+        id;
+
+      const adminId =
+        admin.account.id;
+
+      const evalTrigger =
+        isPublishing
+          ? "publish" as const
+          : "update" as const;
+
+      after(
+        async () => {
+          try {
+            await runKnowledgeTriggeredEvals({
+              knowledgeId,
+
+              adminId,
+
+              trigger:
+                evalTrigger,
+            });
+          } catch (error) {
+            console.error(
+              "Automatic knowledge update eval failed",
+              {
+                knowledgeId,
+
+                adminId,
+
+                evalTrigger,
+
+                error:
+                  safeErrorMetadata(
+                    error
+                  ),
+              }
+            );
+          }
+        }
+      );
+    }
+
+    /*
+     * ========================================
+     * Reload Expanded Item
      * ========================================
      */
 
@@ -1107,8 +1152,7 @@ export async function PATCH(
 
             item:
               serializeKnowledgeItem(
-                updatedRecord ||
-                  existing
+                existing
               ),
 
             contentChanged,
@@ -1181,8 +1225,6 @@ export async function PATCH(
         knowledgeId:
           id,
 
-        updateCompleted,
-
         error:
           safeErrorMetadata(
             error
@@ -1192,7 +1234,7 @@ export async function PATCH(
 
     /*
      * ========================================
-     * Update Failure
+     * Update Failure Audit
      * ========================================
      */
 
@@ -1369,16 +1411,6 @@ export async function PATCH(
       });
     }
 
-    /*
-     * ========================================
-     * Error Response
-     *
-     * اگر PocketBase Update انجام شده باشد،
-     * Client صریحاً می‌فهمد Mutation ذخیره شده
-     * ولی مرحله OpenAI کامل نشده است.
-     * ========================================
-     */
-
     return respond(
       knowledgeApiError(
         requestId,
@@ -1393,8 +1425,7 @@ export async function PATCH(
           : "KNOWLEDGE_UPDATE_FAILED",
 
         metadata.status ===
-          400 &&
-        !updateCompleted
+          400
           ? "اطلاعات مطلب با ساختار PocketBase سازگار نیست."
           : updateCompleted
             ? "تغییرات ذخیره شد، اما تکمیل عملیات OpenAI ناموفق بود."
@@ -1402,11 +1433,11 @@ export async function PATCH(
 
         updateCompleted
           ? {
-              updated:
-                true,
-
               knowledgeId:
                 id,
+
+              updated:
+                true,
             }
           : undefined
       )
@@ -1418,29 +1449,21 @@ export async function PATCH(
  * ============================================
  * DELETE
  *
- * Permanent Delete Draft
- *
- * Rate Limit:
- *
- * knowledge.delete
- * 5 requests / minute / admin
+ * Permanent delete is allowed for Draft only.
  * ============================================
  */
 
 export async function DELETE(
-  request: Request,
+  request:
+    Request,
+
   {
     params,
-  }: Context
+  }:
+    Context
 ) {
   const requestId =
     crypto.randomUUID();
-
-  /*
-   * ==========================================
-   * Admin Authorization
-   * ==========================================
-   */
 
   const admin =
     await getAdminSession();
@@ -1456,15 +1479,11 @@ export async function DELETE(
     );
   }
 
-  /*
-   * ==========================================
-   * Knowledge ID
-   * ==========================================
-   */
-
   const {
-    id: rawId,
-  } = await params;
+    id:
+      rawId,
+  } =
+    await params;
 
   const id =
     cleanRecordId(
@@ -1484,12 +1503,7 @@ export async function DELETE(
 
   /*
    * ==========================================
-   * Admin Rate Limit
-   *
-   * knowledge.delete
-   * 5 requests / minute / admin
-   *
-   * Fail-closed.
+   * Rate Limit
    * ==========================================
    */
 
@@ -1538,25 +1552,56 @@ export async function DELETE(
     );
   }
 
-  /*
-   * ==========================================
-   * Rate Limited
-   * ==========================================
-   */
-
   if (
     !rateLimit.allowed
   ) {
-    return rateLimitedResponse(
-      requestId,
-      rateLimit,
-      "تعداد درخواست‌های حذف مطلب بیش از حد مجاز است."
-    );
-  }
+    const response =
+      knowledgeApiError(
+        requestId,
+        429,
+        "ADMIN_RATE_LIMITED",
+        "تعداد درخواست‌های حذف مطلب بیش از حد مجاز است.",
+        {
+          retryAfterSeconds:
+            rateLimit.retryAfterSeconds,
 
-  const allowedRateLimit:
-    AllowedRateLimit =
-    rateLimit;
+          limit:
+            rateLimit.limit,
+
+          remaining:
+            rateLimit.remaining,
+
+          resetAt:
+            rateLimit.resetAt,
+        }
+      );
+
+    response.headers.set(
+      "Retry-After",
+      String(
+        rateLimit.retryAfterSeconds
+      )
+    );
+
+    response.headers.set(
+      "X-RateLimit-Limit",
+      String(
+        rateLimit.limit
+      )
+    );
+
+    response.headers.set(
+      "X-RateLimit-Remaining",
+      "0"
+    );
+
+    response.headers.set(
+      "X-RateLimit-Reset",
+      rateLimit.resetAt
+    );
+
+    return response;
+  }
 
   const respond =
     <TResponse extends Response>(
@@ -1565,14 +1610,8 @@ export async function DELETE(
     ) =>
       withRateLimitHeaders(
         response,
-        allowedRateLimit
+        rateLimit
       );
-
-  /*
-   * ==========================================
-   * Service Client
-   * ==========================================
-   */
 
   let pb:
     PocketBase;
@@ -1582,7 +1621,7 @@ export async function DELETE(
       await getPocketBaseServiceClient();
   } catch (error) {
     console.error(
-      "Knowledge service unavailable",
+      "Knowledge delete service unavailable",
       {
         requestId,
 
@@ -1608,12 +1647,6 @@ export async function DELETE(
       )
     );
   }
-
-  /*
-   * ==========================================
-   * Load Item
-   * ==========================================
-   */
 
   let item:
     KnowledgeItemRecord;
@@ -1642,15 +1675,9 @@ export async function DELETE(
       200
     );
 
-  /*
-   * ==========================================
-   * Draft Only
-   * ==========================================
-   */
-
   if (
     item.status !==
-    "draft"
+      "draft"
   ) {
     await safeAudit({
       request,
@@ -1675,13 +1702,11 @@ export async function DELETE(
       metadata: {
         title,
 
-        status:
-          normalizeStatusText(
-            item.status
+        current_status:
+          String(
+            item.status ||
+              ""
           ),
-
-        reason:
-          "permanent_delete_requires_draft",
       },
     });
 
@@ -1690,56 +1715,27 @@ export async function DELETE(
         requestId,
         409,
         "DRAFT_REQUIRED",
-        "حذف دائمی فقط برای پیش‌نویس مجاز است؛ مطلب منتشرشده را ابتدا بایگانی کنید."
+        "فقط پیش‌نویس را می‌توان برای همیشه حذف کرد."
       )
     );
   }
 
   /*
-   * ==========================================
-   * Remove Active OpenAI File
-   *
-   * اگر Cleanup شکست بخورد PocketBase Record
-   * حذف نمی‌شود.
-   * ==========================================
+   * اگر Draft هنوز OpenAI file دارد،
+   * قبل از حذف Record آن را پاک می‌کنیم.
    */
-
   if (
     item.openai_file_id
   ) {
-    let cleanup:
-      Awaited<
-        ReturnType<
-          typeof removeKnowledgeItemFromOpenAI
-        >
-      >;
-
-    try {
-      cleanup =
-        await removeKnowledgeItemFromOpenAI(
-          id,
-          pb,
-          item
-        );
-    } catch (error) {
-      console.error(
-        "Knowledge OpenAI cleanup failed",
-        {
-          requestId,
-
-          adminId:
-            admin.account.id,
-
-          knowledgeId:
-            id,
-
-          error:
-            safeErrorMetadata(
-              error
-            ),
-        }
+    const removal =
+      await removeKnowledgeItemFromOpenAI(
+        id,
+        pb
       );
 
+    if (
+      !removal.success
+    ) {
       await safeAudit({
         request,
 
@@ -1758,41 +1754,21 @@ export async function DELETE(
           id,
 
         errorCode:
-          "OPENAI_FILE_REMOVE_EXCEPTION",
+          getOperationCode(
+            removal,
+            "OPENAI_FILE_REMOVE_FAILED"
+          ),
 
         metadata: {
           title,
 
           reason:
-            "knowledge_delete",
-        },
-      });
+            "knowledge_permanent_delete",
 
-      await safeAudit({
-        request,
-
-        requestId,
-
-        actorId:
-          admin.account.id,
-
-        action:
-          "knowledge.delete",
-
-        result:
-          "blocked",
-
-        entityId:
-          id,
-
-        errorCode:
-          "OPENAI_CLEANUP_FAILED",
-
-        metadata: {
-          title,
-
-          reason:
-            "openai_cleanup_exception",
+          message:
+            getOperationMessage(
+              removal
+            ),
         },
       });
 
@@ -1801,111 +1777,10 @@ export async function DELETE(
           requestId,
           503,
           "OPENAI_FILE_REMOVE_FAILED",
-          "حذف فایل فعال از OpenAI ناموفق بود؛ رکورد حذف نشد."
+          "حذف فایل مطلب از OpenAI ناموفق بود؛ مطلب حذف نشد."
         )
       );
     }
-
-    /*
-     * ========================================
-     * Cleanup Failure
-     * ========================================
-     */
-
-    if (
-      !cleanup.success
-    ) {
-      const cleanupCode =
-        getOperationCode(
-          cleanup,
-          "OPENAI_FILE_REMOVE_FAILED"
-        );
-
-      const cleanupStatus =
-        getOperationStatus(
-          cleanup,
-          503
-        );
-
-      await safeAudit({
-        request,
-
-        requestId,
-
-        actorId:
-          admin.account.id,
-
-        action:
-          "knowledge.openai.remove.failure",
-
-        result:
-          "failure",
-
-        entityId:
-          id,
-
-        errorCode:
-          cleanupCode,
-
-        metadata: {
-          title,
-
-          reason:
-            "knowledge_delete",
-
-          message:
-            getOperationMessage(
-              cleanup
-            ),
-        },
-      });
-
-      await safeAudit({
-        request,
-
-        requestId,
-
-        actorId:
-          admin.account.id,
-
-        action:
-          "knowledge.delete",
-
-        result:
-          "blocked",
-
-        entityId:
-          id,
-
-        errorCode:
-          "OPENAI_CLEANUP_FAILED",
-
-        metadata: {
-          title,
-
-          reason:
-            "active_openai_file_could_not_be_removed",
-
-          cleanup_code:
-            cleanupCode,
-        },
-      });
-
-      return respond(
-        knowledgeApiError(
-          requestId,
-          cleanupStatus,
-          cleanupCode,
-          "حذف فایل فعال از OpenAI ناموفق بود؛ رکورد برای جلوگیری از باقی‌ماندن داده حذف نشد."
-        )
-      );
-    }
-
-    /*
-     * ========================================
-     * Cleanup Success
-     * ========================================
-     */
 
     await safeAudit({
       request,
@@ -1928,16 +1803,10 @@ export async function DELETE(
         title,
 
         reason:
-          "knowledge_delete",
+          "knowledge_permanent_delete",
       },
     });
   }
-
-  /*
-   * ==========================================
-   * Delete PocketBase Record
-   * ==========================================
-   */
 
   try {
     await pb
@@ -1948,23 +1817,10 @@ export async function DELETE(
         id
       );
   } catch (error) {
-    console.error(
-      "Knowledge delete failed",
-      {
-        requestId,
-
-        adminId:
-          admin.account.id,
-
-        knowledgeId:
-          id,
-
-        error:
-          safeErrorMetadata(
-            error
-          ),
-      }
-    );
+    const metadata =
+      getPocketBaseError(
+        error
+      );
 
     await safeAudit({
       request,
@@ -1989,28 +1845,29 @@ export async function DELETE(
       metadata: {
         title,
 
-        openai_cleanup_completed:
-          Boolean(
-            item.openai_file_id
-          ),
+        pocketbase_status:
+          metadata.status,
       },
     });
 
     return respond(
       knowledgeApiError(
         requestId,
-        503,
-        "KNOWLEDGE_DELETE_FAILED",
-        "حذف پیش‌نویس ناموفق بود."
+        metadata.status ===
+          404
+          ? 404
+          : 503,
+        metadata.status ===
+          404
+          ? "KNOWLEDGE_NOT_FOUND"
+          : "KNOWLEDGE_DELETE_FAILED",
+        metadata.status ===
+          404
+          ? "مطلب موردنظر پیدا نشد."
+          : "حذف مطلب ناموفق بود."
       )
     );
   }
-
-  /*
-   * ==========================================
-   * Audit: Delete Success
-   * ==========================================
-   */
 
   await safeAudit({
     request,
@@ -2033,8 +1890,9 @@ export async function DELETE(
       title,
 
       previous_status:
-        normalizeStatusText(
-          item.status
+        String(
+          item.status ||
+            ""
         ),
 
       version:
@@ -2049,12 +1907,6 @@ export async function DELETE(
         ),
     },
   });
-
-  /*
-   * ==========================================
-   * Success
-   * ==========================================
-   */
 
   return respond(
     knowledgeApiResponse(
@@ -2075,83 +1927,40 @@ export async function DELETE(
 
 /*
  * ============================================
- * Rate Limited Response
+ * Item Error
  * ============================================
  */
 
-function rateLimitedResponse(
+function itemErrorResponse(
   requestId:
     string,
 
-  rateLimit: {
-    allowed:
-      false;
-
-    code:
-      "ADMIN_RATE_LIMITED";
-
-    limit:
-      number;
-
-    remaining:
-      0;
-
-    retryAfterSeconds:
-      number;
-
-    resetAt:
-      string;
-  },
-
-  message:
-    string
+  error:
+    unknown
 ) {
-  const response =
-    knowledgeApiError(
-      requestId,
-      429,
-      "ADMIN_RATE_LIMITED",
-      message,
-      {
-        retryAfterSeconds:
-          rateLimit.retryAfterSeconds,
-
-        limit:
-          rateLimit.limit,
-
-        remaining:
-          rateLimit.remaining,
-
-        resetAt:
-          rateLimit.resetAt,
-      }
+  const metadata =
+    getPocketBaseError(
+      error
     );
 
-  response.headers.set(
-    "Retry-After",
-    String(
-      rateLimit.retryAfterSeconds
-    )
-  );
+  return knowledgeApiError(
+    requestId,
 
-  response.headers.set(
-    "X-RateLimit-Limit",
-    String(
-      rateLimit.limit
-    )
-  );
+    metadata.status ===
+      404
+      ? 404
+      : 503,
 
-  response.headers.set(
-    "X-RateLimit-Remaining",
-    "0"
-  );
+    metadata.status ===
+      404
+      ? "KNOWLEDGE_NOT_FOUND"
+      : "KNOWLEDGE_LOAD_FAILED",
 
-  response.headers.set(
-    "X-RateLimit-Reset",
-    rateLimit.resetAt
+    metadata.status ===
+      404
+      ? "مطلب موردنظر پیدا نشد."
+      : "دریافت مطلب ناموفق بود."
   );
-
-  return response;
 }
 
 /*
@@ -2202,9 +2011,6 @@ function withRateLimitHeaders<
 /*
  * ============================================
  * Audit Helper
- *
- * Audit failure هیچ‌وقت Mutation اصلی را
- * تغییر نمی‌دهد.
  * ============================================
  */
 
@@ -2295,8 +2101,6 @@ async function safeAudit({
 
         entityId,
 
-        result,
-
         error:
           safeErrorMetadata(
             error
@@ -2308,39 +2112,125 @@ async function safeAudit({
 
 /*
  * ============================================
- * Item Error
+ * Update Message
  * ============================================
  */
 
-function itemErrorResponse(
-  requestId:
+function getUpdateSuccessMessage(
+  status:
     string,
 
-  error:
+  operation:
     unknown
 ) {
-  const metadata =
-    getPocketBaseError(
-      error
-    );
+  if (
+    status ===
+    "draft"
+  ) {
+    return operation &&
+      !isOperationSuccess(
+        operation
+      )
+      ? "پیش‌نویس ذخیره شد، اما حذف فایل قبلی از OpenAI ناموفق بود."
+      : "پیش‌نویس با موفقیت ذخیره شد.";
+  }
 
-  return knowledgeApiError(
-    requestId,
+  return operation &&
+    !isOperationSuccess(
+      operation
+    )
+    ? "تغییرات ذخیره شد، اما همگام‌سازی ناموفق بود."
+    : "تغییرات با موفقیت ذخیره شد.";
+}
 
-    metadata.status ===
-      404
-      ? 404
-      : 503,
+/*
+ * ============================================
+ * Operation Helpers
+ * ============================================
+ */
 
-    metadata.status ===
-      404
-      ? "KNOWLEDGE_NOT_FOUND"
-      : "KNOWLEDGE_LOAD_FAILED",
+function isOperationSuccess(
+  value:
+    unknown
+) {
+  if (
+    typeof value !==
+      "object" ||
+    value ===
+      null
+  ) {
+    return false;
+  }
 
-    metadata.status ===
-      404
-      ? "مطلب موردنظر پیدا نشد."
-      : "دریافت اطلاعات مطلب ناموفق بود."
+  return (
+    value as {
+      success?:
+        unknown;
+    }
+  ).success ===
+    true;
+}
+
+function getOperationCode(
+  value:
+    unknown,
+
+  fallback:
+    string
+) {
+  if (
+    typeof value !==
+      "object" ||
+    value ===
+      null
+  ) {
+    return fallback;
+  }
+
+  const code =
+    (
+      value as {
+        code?:
+          unknown;
+      }
+    ).code;
+
+  return typeof code ===
+    "string" &&
+    code.trim()
+      ? code
+          .trim()
+          .slice(
+            0,
+            120
+          )
+      : fallback;
+}
+
+function getOperationMessage(
+  value:
+    unknown
+) {
+  if (
+    typeof value !==
+      "object" ||
+    value ===
+      null
+  ) {
+    return "";
+  }
+
+  const message =
+    (
+      value as {
+        message?:
+          unknown;
+      }
+    ).message;
+
+  return cleanAuditText(
+    message,
+    500
   );
 }
 
@@ -2354,268 +2244,17 @@ function cleanRecordId(
   value:
     unknown
 ) {
-  if (
-    typeof value !==
-    "string"
-  ) {
-    return "";
-  }
-
   const id =
-    value.trim();
+    String(
+      value ||
+        ""
+    ).trim();
 
-  return RECORD_ID_PATTERN.test(
+  return /^[a-zA-Z0-9_-]{1,64}$/.test(
     id
   )
     ? id
     : "";
-}
-
-/*
- * ============================================
- * Knowledge Status
- * ============================================
- */
-
-function normalizeStatusText(
-  value:
-    unknown
-) {
-  if (
-    value ===
-    "published"
-  ) {
-    return "published";
-  }
-
-  if (
-    value ===
-    "draft"
-  ) {
-    return "draft";
-  }
-
-  if (
-    typeof value !==
-    "string"
-  ) {
-    return "unknown";
-  }
-
-  return value
-    .trim()
-    .slice(
-      0,
-      50
-    ) ||
-    "unknown";
-}
-
-/*
- * ============================================
- * Sync Status
- * ============================================
- */
-
-function normalizeSyncStatus(
-  value:
-    unknown
-):
-  | "pending"
-  | "synced"
-  | "error" {
-  if (
-    value ===
-    "synced"
-  ) {
-    return "synced";
-  }
-
-  if (
-    value ===
-    "error"
-  ) {
-    return "error";
-  }
-
-  return "pending";
-}
-
-/*
- * ============================================
- * Operation Code
- * ============================================
- */
-
-function getOperationCode(
-  result:
-    unknown,
-
-  fallback:
-    string
-) {
-  if (
-    typeof result !==
-      "object" ||
-    result ===
-      null
-  ) {
-    return fallback;
-  }
-
-  const value =
-    result as {
-      code?:
-        unknown;
-    };
-
-  if (
-    typeof value.code !==
-    "string"
-  ) {
-    return fallback;
-  }
-
-  const code =
-    value.code
-      .trim()
-      .slice(
-        0,
-        120
-      );
-
-  return (
-    code ||
-    fallback
-  );
-}
-
-/*
- * ============================================
- * Operation Message
- * ============================================
- */
-
-function getOperationMessage(
-  result:
-    unknown
-) {
-  if (
-    typeof result !==
-      "object" ||
-    result ===
-      null
-  ) {
-    return "";
-  }
-
-  const value =
-    result as {
-      message?:
-        unknown;
-    };
-
-  if (
-    typeof value.message !==
-    "string"
-  ) {
-    return "";
-  }
-
-  return cleanAuditText(
-    value.message,
-    500
-  );
-}
-
-/*
- * ============================================
- * Operation Status
- * ============================================
- */
-
-function getOperationStatus(
-  result:
-    unknown,
-
-  fallback:
-    number
-) {
-  if (
-    typeof result !==
-      "object" ||
-    result ===
-      null
-  ) {
-    return fallback;
-  }
-
-  const value =
-    result as {
-      status?:
-        unknown;
-    };
-
-  const status =
-    Number(
-      value.status
-    );
-
-  if (
-    !Number.isSafeInteger(
-      status
-    ) ||
-    status <
-      400 ||
-    status >
-      599
-  ) {
-    return fallback;
-  }
-
-  return status;
-}
-
-/*
- * ============================================
- * Update Success Message
- * ============================================
- */
-
-function getUpdateSuccessMessage(
-  status:
-    string,
-
-  operation:
-    unknown
-) {
-  const operationFailed =
-    typeof operation ===
-      "object" &&
-    operation !==
-      null &&
-    "success" in
-      operation &&
-    (
-      operation as {
-        success?:
-          unknown;
-      }
-    ).success ===
-      false;
-
-  if (
-    status ===
-    "draft"
-  ) {
-    return operationFailed
-      ? "پیش‌نویس ذخیره شد، اما حذف فایل قبلی از OpenAI ناموفق بود."
-      : "پیش‌نویس با موفقیت ذخیره شد.";
-  }
-
-  return operationFailed
-    ? "تغییرات ذخیره شد، اما همگام‌سازی ناموفق بود."
-    : "تغییرات با موفقیت ذخیره شد.";
 }
 
 /*
@@ -2667,8 +2306,10 @@ function safeErrorMetadata(
       null
   ) {
     return {
-      name:
-        "UnknownError",
+      message:
+        String(
+          error
+        ),
     };
   }
 
@@ -2684,6 +2325,9 @@ function safeErrorMetadata(
         unknown;
 
       code?:
+        unknown;
+
+      request_id?:
         unknown;
     };
 
@@ -2712,6 +2356,12 @@ function safeErrorMetadata(
       typeof value.code ===
         "number"
         ? value.code
+        : undefined,
+
+    requestId:
+      typeof value.request_id ===
+      "string"
+        ? value.request_id
         : undefined,
   };
 }

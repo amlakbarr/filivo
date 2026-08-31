@@ -56,6 +56,18 @@ const MAX_TOPIC_NAME_LENGTH =
 const MAX_DESCRIPTION_LENGTH =
   200;
 
+
+const MAX_TOPIC_KEYWORDS_INPUT_LENGTH =
+  400;
+
+const MAX_TOPIC_EXAMPLES_INPUT_LENGTH =
+  600;
+
+const MAX_TOPIC_NEGATIVE_EXAMPLES_INPUT_LENGTH =
+  600;
+
+const MAX_TOPIC_CLASSIFICATION_NOTE_INPUT_LENGTH =
+  500;
 const DEFAULT_MIN_CONFIDENCE =
   0.65;
 
@@ -170,20 +182,22 @@ type TopicCandidate = {
   name:
     string;
 
-  parentId:
-    string |
-    null;
-
-  parentName:
-    string |
-    null;
-
   description:
     string |
     null;
 
-  isLeaf:
-    boolean;
+  keywords:
+    string[];
+
+  examples:
+    string[];
+
+  negativeExamples:
+    string[];
+
+  classificationNote:
+    string |
+    null;
 };
 
 /*
@@ -1176,6 +1190,392 @@ export async function classifyUserMessage({
 
 /*
  * ============================================
+ * Classification Preview
+ *
+ * Admin diagnostic helper.
+ *
+ * نکات مهم:
+ * - هیچ Message آزمایشی ایجاد نمی‌کند.
+ * - هیچ Conversation آزمایشی ایجاد نمی‌کند.
+ * - نتیجه را در PocketBase ذخیره نمی‌کند.
+ * - از همان Prompt و Topic Candidateهای
+ *   Classification واقعی استفاده می‌کند.
+ * ============================================
+ */
+
+export type TopicClassificationPreviewTopicOverride = {
+  topicId:
+    string;
+
+  keywords:
+    string;
+
+  examples:
+    string;
+
+  negativeExamples:
+    string;
+
+  classificationNote:
+    string;
+};
+
+export type TopicClassificationPreviewResult = {
+  status:
+    | "classified"
+    | "unclassified";
+
+  /*
+   * مقدار خام matched که خود مدل برگردانده.
+   */
+  matched:
+    boolean;
+
+  /*
+   * Topic نهایی بعد از اعمال Threshold.
+   */
+  topicId:
+    string |
+    null;
+
+  topicName:
+    string |
+    null;
+
+  /*
+   * اگر مدل Topic معتبری پیشنهاد داده باشد،
+   * حتی اگر Confidence زیر Threshold باشد،
+   * اینجا نگه داشته می‌شود.
+   */
+  suggestedTopicId:
+    string |
+    null;
+
+  suggestedTopicName:
+    string |
+    null;
+
+  confidence:
+    number;
+
+  threshold:
+    number;
+
+  model:
+    string;
+
+  responseId:
+    string;
+
+  latencyMs:
+    number;
+
+  candidateCount:
+    number;
+};
+
+export async function previewTopicClassification({
+  question,
+  context = [],
+  topicOverride,
+}: {
+  question:
+    string;
+
+  context?:
+    ClassificationContextMessage[];
+
+  topicOverride?:
+    TopicClassificationPreviewTopicOverride;
+}): Promise<TopicClassificationPreviewResult> {
+  /*
+   * ========================================
+   * Input
+   * ========================================
+   */
+
+  const cleanQuestion =
+    normalizeText(
+      question,
+      MAX_QUESTION_LENGTH
+    );
+
+  if (
+    !cleanQuestion
+  ) {
+    throw new Error(
+      "Classification preview question is required"
+    );
+  }
+
+  /*
+   * ========================================
+   * PocketBase + Candidates
+   * ========================================
+   */
+
+  const pb =
+    await getPocketBaseServiceClient();
+
+  const baseCandidates =
+    await getActiveTopics(
+      pb
+    );
+
+  const candidates =
+    topicOverride
+      ? applyTopicClassificationPreviewOverride(
+          baseCandidates,
+          topicOverride
+        )
+      : baseCandidates;
+
+  /*
+   * ========================================
+   * Model + Threshold
+   * ========================================
+   */
+
+  const model =
+    getOpenAIClassifierModel();
+
+  const threshold =
+    getTopicClassificationMinConfidence();
+
+  /*
+   * اگر Topic فعالی نداریم،
+   * OpenAI Call انجام نمی‌دهیم.
+   */
+  if (
+    candidates.length ===
+    0
+  ) {
+    return {
+      status:
+        "unclassified",
+
+      matched:
+        false,
+
+      topicId:
+        null,
+
+      topicName:
+        null,
+
+      suggestedTopicId:
+        null,
+
+      suggestedTopicName:
+        null,
+
+      confidence:
+        0,
+
+      threshold,
+
+      model,
+
+      responseId:
+        "",
+
+      latencyMs:
+        0,
+
+      candidateCount:
+        0,
+    };
+  }
+
+  /*
+   * ========================================
+   * Classifier Input
+   * ========================================
+   */
+
+  const classifierInput =
+    buildClassifierInput(
+      cleanQuestion,
+      context,
+      candidates
+    );
+
+  /*
+   * ========================================
+   * OpenAI
+   * ========================================
+   */
+
+  const startedAt =
+    Date.now();
+
+  const response =
+    await createClassificationResponse(
+      model,
+      classifierInput
+    );
+
+  const latencyMs =
+    Date.now() -
+    startedAt;
+
+  /*
+   * ========================================
+   * Parsed Output
+   * ========================================
+   */
+
+  const parsed =
+    response.output_parsed;
+
+  if (
+    response.status !==
+      "completed" ||
+    !parsed
+  ) {
+    throw new Error(
+      "Classification preview response was incomplete or unparsed"
+    );
+  }
+
+  /*
+   * ========================================
+   * Confidence
+   * ========================================
+   */
+
+  const parsedConfidence =
+    clampConfidence(
+      parsed.confidence
+    );
+
+  /*
+   * ========================================
+   * Topic Validation
+   *
+   * حتی اگر مدل ID اشتباه برگرداند،
+   * فقط Candidateهای واقعی را قبول می‌کنیم.
+   * ========================================
+   */
+
+  const parsedTopicId =
+    cleanRecordId(
+      parsed.topic_id
+    );
+
+  const candidateById =
+    new Map(
+      candidates.map(
+        (
+          candidate
+        ) => [
+          candidate.id,
+          candidate,
+        ]
+      )
+    );
+
+  const validTopicId =
+    parsed.matched &&
+    parsedTopicId &&
+    candidateById.has(
+      parsedTopicId
+    )
+      ? parsedTopicId
+      : null;
+
+  /*
+   * اگر matched=false باشد،
+   * Confidence نهایی را صفر در نظر می‌گیریم.
+   */
+  const confidence =
+    parsed.matched
+      ? parsedConfidence
+      : 0;
+
+  /*
+   * ========================================
+   * Threshold
+   * ========================================
+   */
+
+  const classified =
+    validTopicId !==
+      null &&
+    confidence >=
+      threshold;
+
+  const suggested =
+    validTopicId
+      ? candidateById.get(
+          validTopicId
+        ) ||
+        null
+      : null;
+
+  /*
+   * ========================================
+   * Result
+   * ========================================
+   */
+
+  return {
+    status:
+      classified
+        ? "classified"
+        : "unclassified",
+
+    matched:
+      parsed.matched ===
+      true,
+
+    /*
+     * topicId فقط وقتی برمی‌گردد که
+     * Threshold پاس شده باشد.
+     */
+    topicId:
+      classified
+        ? validTopicId
+        : null,
+
+    topicName:
+      classified
+        ? suggested?.name ||
+          null
+        : null,
+
+    /*
+     * Suggested Topic حتی در صورت پایین بودن
+     * Confidence برای Diagnostic مفید است.
+     */
+    suggestedTopicId:
+      validTopicId,
+
+    suggestedTopicName:
+      suggested?.name ||
+      null,
+
+    confidence,
+
+    threshold,
+
+    model,
+
+    responseId:
+      String(
+        response.id ||
+          ""
+      ),
+
+    latencyMs,
+
+    candidateCount:
+      candidates.length,
+  };
+}
+
+/*
+ * ============================================
  * Confidence Config
  * ============================================
  */
@@ -1210,10 +1610,15 @@ const CLASSIFIER_INSTRUCTIONS = `
 قواعد:
 - فقط از topic_idهای فهرست Candidateها استفاده کن و Topic جدید نساز.
 - موضوع سؤال فعلی را طبقه‌بندی کن؛ Context فقط برای رفع ابهام Follow-up است.
-- اگر چند سطح مناسب‌اند، دقیق‌ترین Child یا Leaf مرتبط را انتخاب کن.
-- شباهت چند واژه به‌تنهایی کافی نیست و معنای سؤال باید واقعاً با Topic منطبق باشد.
+- Taxonomy فعلی Flat است؛ هیچ Parent/Child فرض نکن.
+- name و description تعریف پایه Topic هستند.
+- classification_note مرز معنایی Topic را مشخص می‌کند و باید جدی گرفته شود.
+- keywords فقط نشانه کمکی هستند؛ شباهت چند واژه به‌تنهایی برای Match کافی نیست.
+- examples نمونه‌های مثبت‌اند و برای فهم Intent استفاده می‌شوند، نه برای Match لفظ‌به‌لفظ.
+- negative_examples مرزهای منفی‌اند؛ اگر سؤال به آنها نزدیک‌تر است آن Topic را انتخاب نکن.
+- وقتی چند Candidate نزدیک هستند، Candidateای را انتخاب کن که هم با معنای سؤال و هم با راهنمای مثبت/منفی سازگارتر است.
 - سلام، تشکر، مکالمه عمومی و سؤال نامرتبط را matched=false برگردان.
-- اگر سؤال مبهم یا بدون Topic مناسب است matched=false و topic_id=null برگردان.
+- اگر سؤال مبهم است یا هیچ Topic مناسبی وجود ندارد matched=false و topic_id=null برگردان.
 - confidence میزان اطمینان به Match معنایی است و باید بین صفر و یک باشد.
 `;
 
@@ -1420,40 +1825,23 @@ async function getActiveTopics(
             "active = true",
 
           sort:
-            "name",
+            "sort_order,name",
 
-          expand:
-            "parent",
+          fields:
+            [
+              "id",
+              "name",
+              "description",
+              "keywords",
+              "examples",
+              "negative_examples",
+              "classification_note",
+              "sort_order",
+            ].join(
+              ","
+            ),
         }
       );
-
-  const recordsById =
-    new Map(
-      result.items.map(
-        (
-          record
-        ) => [
-          record.id,
-          record,
-        ]
-      )
-    );
-
-  const parentIds =
-    new Set(
-      result.items
-        .map(
-          (
-            record
-          ) =>
-            cleanRecordId(
-              record.parent
-            )
-        )
-        .filter(
-          Boolean
-        )
-    );
 
   return result.items
     .map(
@@ -1472,39 +1860,40 @@ async function getActiveTopics(
           return null;
         }
 
-        const parentId =
-          cleanRecordId(
-            record.parent
-          ) ||
-          null;
-
-        const expandedParent =
-          getExpandedParent(
-            record
-          );
-
-        const parentRecord =
-          parentId
-            ? recordsById.get(
-                parentId
-              ) as
-                | RecordModel
-                | undefined
-            : undefined;
-
-        const parentName =
-          normalizeText(
-            expandedParent?.name ||
-              parentRecord?.name ||
-              "",
-            MAX_TOPIC_NAME_LENGTH
-          ) ||
-          null;
-
         const description =
           normalizeText(
             record.description,
             MAX_DESCRIPTION_LENGTH
+          );
+
+        const keywords =
+          parseGuidanceLines(
+            record.keywords,
+            12,
+            50,
+            MAX_TOPIC_KEYWORDS_INPUT_LENGTH
+          );
+
+        const examples =
+          parseGuidanceLines(
+            record.examples,
+            4,
+            160,
+            MAX_TOPIC_EXAMPLES_INPUT_LENGTH
+          );
+
+        const negativeExamples =
+          parseGuidanceLines(
+            record.negative_examples,
+            4,
+            160,
+            MAX_TOPIC_NEGATIVE_EXAMPLES_INPUT_LENGTH
+          );
+
+        const classificationNote =
+          normalizeText(
+            record.classification_note,
+            MAX_TOPIC_CLASSIFICATION_NOTE_INPUT_LENGTH
           );
 
         return {
@@ -1513,18 +1902,19 @@ async function getActiveTopics(
 
           name,
 
-          parentId,
-
-          parentName,
-
           description:
             description ||
             null,
 
-          isLeaf:
-            !parentIds.has(
-              record.id
-            ),
+          keywords,
+
+          examples,
+
+          negativeExamples,
+
+          classificationNote:
+            classificationNote ||
+            null,
         } satisfies TopicCandidate;
       }
     )
@@ -1612,17 +2002,20 @@ function buildClassifierInput(
           name:
             candidate.name,
 
-          parent_id:
-            candidate.parentId,
-
-          parent_name:
-            candidate.parentName,
-
           description:
             candidate.description,
 
-          is_leaf:
-            candidate.isLeaf,
+          keywords:
+            candidate.keywords,
+
+          examples:
+            candidate.examples,
+
+          negative_examples:
+            candidate.negativeExamples,
+
+          classification_note:
+            candidate.classificationNote,
         })
       ),
   });
@@ -1940,50 +2333,6 @@ function safeBudgetInteger(
  * ============================================
  */
 
-function getExpandedParent(
-  record:
-    RecordModel
-) {
-  const expand =
-    record.expand as
-      | Record<
-          string,
-          unknown
-        >
-      | undefined;
-
-  const rawParent =
-    expand?.parent;
-
-  const parent =
-    Array.isArray(
-      rawParent
-    )
-      ? rawParent[0]
-      : rawParent;
-
-  if (
-    typeof parent !==
-      "object" ||
-    parent ===
-      null
-  ) {
-    return null;
-  }
-
-  return {
-    name:
-      normalizeText(
-        (
-          parent as Record<
-            string,
-            unknown
-          >
-        ).name,
-        MAX_TOPIC_NAME_LENGTH
-      ),
-  };
-}
 
 /*
  * ============================================
@@ -2069,6 +2418,170 @@ function cleanRecordId(
  * Text Normalization
  * ============================================
  */
+
+function applyTopicClassificationPreviewOverride(
+  candidates:
+    TopicCandidate[],
+
+  override:
+    TopicClassificationPreviewTopicOverride
+) {
+  const topicId =
+    cleanRecordId(
+      override.topicId
+    );
+
+  if (
+    !topicId
+  ) {
+    throw new Error(
+      "Classification preview override topic id is invalid"
+    );
+  }
+
+  let found =
+    false;
+
+  const next =
+    candidates.map(
+      (
+        candidate
+      ) => {
+        if (
+          candidate.id !==
+          topicId
+        ) {
+          return candidate;
+        }
+
+        found =
+          true;
+
+        return {
+          ...candidate,
+
+          keywords:
+            parseGuidanceLines(
+              override.keywords,
+              12,
+              50,
+              MAX_TOPIC_KEYWORDS_INPUT_LENGTH
+            ),
+
+          examples:
+            parseGuidanceLines(
+              override.examples,
+              4,
+              160,
+              MAX_TOPIC_EXAMPLES_INPUT_LENGTH
+            ),
+
+          negativeExamples:
+            parseGuidanceLines(
+              override.negativeExamples,
+              4,
+              160,
+              MAX_TOPIC_NEGATIVE_EXAMPLES_INPUT_LENGTH
+            ),
+
+          classificationNote:
+            normalizeText(
+              override.classificationNote,
+              MAX_TOPIC_CLASSIFICATION_NOTE_INPUT_LENGTH
+            ) ||
+            null,
+        } satisfies TopicCandidate;
+      }
+    );
+
+  if (
+    !found
+  ) {
+    throw new Error(
+      "Classification preview override topic is not an active candidate"
+    );
+  }
+
+  return next;
+}
+
+function parseGuidanceLines(
+  value:
+    unknown,
+
+  maxItems:
+    number,
+
+  maxItemLength:
+    number,
+
+  maxTotalLength:
+    number
+) {
+  if (
+    typeof value !==
+    "string"
+  ) {
+    return [];
+  }
+
+  const result:
+    string[] = [];
+
+  let totalLength =
+    0;
+
+  for (
+    const rawLine of
+    value
+      .replace(
+        /\\r\\n?/g,
+        "\\n"
+      )
+      .split(
+        "\\n"
+      )
+  ) {
+    const line =
+      normalizeText(
+        rawLine,
+        maxItemLength
+      );
+
+    if (
+      !line ||
+      result.includes(
+        line
+      )
+    ) {
+      continue;
+    }
+
+    if (
+      totalLength +
+        line.length >
+      maxTotalLength
+    ) {
+      break;
+    }
+
+    result.push(
+      line
+    );
+
+    totalLength +=
+      line.length;
+
+    if (
+      result.length >=
+      maxItems
+    ) {
+      break;
+    }
+  }
+
+  return result;
+}
 
 function normalizeText(
   value:

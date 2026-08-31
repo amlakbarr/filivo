@@ -21,7 +21,7 @@ import {
 } from "@/lib/ai/budget-reservation";
 
 import {
-  determineHasAnswer,
+  buildChatFileSearchFilter,
   extractCitedFileIds,
   extractFileSearchResults,
   getChatRetrievalSettings,
@@ -75,6 +75,14 @@ import type {
   ChatMessage,
   ChatSource,
 } from "@/types/chat";
+
+import {
+  enforceGroundedAnswer,
+} from "@/lib/ai/chat-grounding";
+
+import {
+  verifyGroundedAnswer,
+} from "@/lib/ai/chat-grounding-verifier";
 
 /*
  * ============================================
@@ -157,6 +165,7 @@ type ChatStage =
   | "user_persistence"
   | "openai"
   | "source_resolution"
+  | "grounding_verification"
   | "assistant_persistence"
   | "conversation_update";
 
@@ -981,7 +990,12 @@ export async function POST(
     const vectorStoreId =
       getOpenAIVectorStoreId();
 
-    const reservationInputTokens =
+    const preflightFileSearchFilter =
+      buildChatFileSearchFilter(
+        null
+      );
+
+    const preflightReservationInputTokens =
       estimateChatReservationInputTokens({
         model,
 
@@ -996,6 +1010,9 @@ export async function POST(
 
         minScore:
           retrievalSettings.minScore,
+
+        fileSearchFilter:
+          preflightFileSearchFilter,
       });
 
     stage =
@@ -1013,7 +1030,7 @@ export async function POST(
             model,
 
             inputTokens:
-              reservationInputTokens,
+              preflightReservationInputTokens,
 
             outputTokens:
               CHAT_MAX_OUTPUT_TOKENS,
@@ -1255,6 +1272,327 @@ export async function POST(
         userMessage:
           persistedUserMessage,
       });
+    }
+
+    /*
+     * ========================================
+     * Topic Classification Before Chat
+     *
+     * Topic باید قبل از File Search مشخص شود
+     * تا Retrieval بتواند فقط Knowledge همان
+     * Topic را جست‌وجو کند.
+     *
+     * خود Classifier Budget Guard / Reservation /
+     * Usage Accounting مستقل دارد. خطای Classifier
+     * Chat را متوقف نمی‌کند و در آن حالت Retrieval
+     * عمومیِ published ادامه پیدا می‌کند.
+     * ========================================
+     */
+
+    stage =
+      "request_lock";
+
+    try {
+      await refreshChatRequestLock({
+        userId:
+          account.id,
+
+        requestId,
+      });
+    } catch (error) {
+      logStageError(
+        requestId,
+        stage,
+        error,
+        {
+          operation:
+            "refresh_request_lock_before_classification",
+        }
+      );
+
+      return jsonError({
+        requestId,
+
+        status:
+          503,
+
+        code:
+          "CHAT_GUARD_UNAVAILABLE",
+
+        message:
+          "امکان حفظ وضعیت درخواست در حال حاضر وجود ندارد. دوباره تلاش کنید.",
+
+        userMessage:
+          persistedUserMessage,
+      });
+    }
+
+    let classificationTopicId:
+      string |
+      null =
+        null;
+
+    stage =
+      "classification";
+
+    try {
+      const classification =
+        await classifyUserMessage({
+          question:
+            content,
+
+          context:
+            history,
+
+          userId:
+            account.id,
+
+          conversationId:
+            conversation.id,
+
+          messageId:
+            userMessage.id,
+        });
+
+      if (
+        classification.status ===
+          "classified" ||
+        classification.status ===
+          "skipped"
+      ) {
+        classificationTopicId =
+          classification.topicId;
+      }
+
+      if (
+        classification.status ===
+        "error"
+      ) {
+        console.warn(
+          "Topic classification completed with error status; chat will use published-only retrieval",
+          {
+            requestId,
+
+            userId:
+              account.id,
+
+            conversationId:
+              conversation.id,
+
+            messageId:
+              userMessage.id,
+          }
+        );
+      }
+    } catch (error) {
+      classificationTopicId =
+        null;
+
+      logStageError(
+        requestId,
+        stage,
+        error,
+        {
+          operation:
+            "classify_before_chat",
+
+          messageId:
+            userMessage.id,
+        }
+      );
+    }
+
+    /*
+     * Classification ممکن است زمان‌بر باشد.
+     * بعد از آن Ownership/TTL Lock را دوباره
+     * تأیید می‌کنیم، قبل از اینکه Chat Budget
+     * نهایی و Reservation ایجاد شود.
+     */
+
+    stage =
+      "request_lock";
+
+    try {
+      await refreshChatRequestLock({
+        userId:
+          account.id,
+
+        requestId,
+      });
+    } catch (error) {
+      logStageError(
+        requestId,
+        stage,
+        error,
+        {
+          operation:
+            "refresh_request_lock_after_classification",
+        }
+      );
+
+      return jsonError({
+        requestId,
+
+        status:
+          503,
+
+        code:
+          "CHAT_GUARD_UNAVAILABLE",
+
+        message:
+          "امکان حفظ وضعیت درخواست در حال حاضر وجود ندارد. دوباره تلاش کنید.",
+
+        userMessage:
+          persistedUserMessage,
+      });
+    }
+
+    /*
+     * ========================================
+     * Final Topic-aware Chat Budget Guard
+     *
+     * Preflight Guard قبل از Persist انجام شد.
+     * اما Classification خودش مصرف AI دارد؛
+     * بنابراین قبل از Chat Reservation باید
+     * Budget با Usage جدید و Filter نهایی دوباره
+     * بررسی شود.
+     * ========================================
+     */
+
+    const fileSearchFilter =
+      buildChatFileSearchFilter(
+        classificationTopicId
+      );
+
+    const reservationInputTokens =
+      estimateChatReservationInputTokens({
+        model,
+
+        assistantInstructions,
+
+        input,
+
+        vectorStoreId,
+
+        maxResults:
+          retrievalSettings.maxResults,
+
+        minScore:
+          retrievalSettings.minScore,
+
+        fileSearchFilter,
+      });
+
+    stage =
+      "budget_guard";
+
+    let finalBudgetGuard;
+
+    try {
+      finalBudgetGuard =
+        await checkAIBudgetGuard({
+          userId:
+            account.id,
+
+          reservation: {
+            model,
+
+            inputTokens:
+              reservationInputTokens,
+
+            outputTokens:
+              CHAT_MAX_OUTPUT_TOKENS,
+          },
+
+          excludeReservationRequestId:
+            requestId,
+        });
+    } catch (error) {
+      logStageError(
+        requestId,
+        stage,
+        error,
+        {
+          operation:
+            "final_chat_budget_guard_after_classification",
+        }
+      );
+
+      return jsonError({
+        requestId,
+
+        status:
+          503,
+
+        code:
+          "AI_BUDGET_GUARD_UNAVAILABLE",
+
+        message:
+          "امکان بررسی سهمیه هوش مصنوعی در حال حاضر وجود ندارد. کمی بعد دوباره تلاش کنید.",
+
+        userMessage:
+          persistedUserMessage,
+      });
+    }
+
+    if (
+      !finalBudgetGuard.allowed
+    ) {
+      return jsonError({
+        requestId,
+
+        status:
+          429,
+
+        code:
+          finalBudgetGuard.code,
+
+        message:
+          getBudgetLimitMessage(
+            finalBudgetGuard.code
+          ),
+
+        retryAfterSeconds:
+          finalBudgetGuard.retryAfterSeconds,
+
+        userMessage:
+          persistedUserMessage,
+      });
+    }
+
+    if (
+      finalBudgetGuard.warnings.length >
+      0
+    ) {
+      console.warn(
+        "AI budget warning after topic classification",
+        {
+          requestId,
+
+          userId:
+            account.id,
+
+          topicId:
+            classificationTopicId,
+
+          warnings:
+            finalBudgetGuard.warnings.map(
+              (
+                warning
+              ) => ({
+                type:
+                  warning.type,
+
+                percent:
+                  Math.round(
+                    warning.percent *
+                      100
+                  ) /
+                  100,
+              })
+            ),
+        }
+      );
     }
 
     /*
@@ -1505,16 +1843,8 @@ export async function POST(
                   retrievalSettings
                     .maxResults,
 
-                filters: {
-                  type:
-                    "eq",
-
-                  key:
-                    "status",
-
-                  value:
-                    "published",
-                },
+                filters:
+                  fileSearchFilter,
 
                 ranking_options:
                   {
@@ -1599,7 +1929,7 @@ export async function POST(
       Date.now() -
       startedAt;
 
-    const answer =
+    let answer =
       openAIResponse
         .output_text
         .trim();
@@ -1845,16 +2175,243 @@ export async function POST(
 
     /*
      * ========================================
-     * Has Answer
+     * Hard Grounding Gate
      * ========================================
      */
 
-    const hasAnswer =
-      determineHasAnswer({
+    const groundingCheckedAt =
+      new Date()
+        .toISOString();
+
+    /*
+     * این Countها قبل از هر Block ثبت می‌شوند
+     * تا Analytics بتواند تفاوت بین:
+     *
+     * - بدون Retrieval
+     * - Retrieval نامعتبر
+     * - Evidence معتبر ولی Claim نامعتبر
+     *
+     * را تشخیص دهد.
+     */
+
+    const groundingRetrievalCount =
+      retrievalResults.length;
+
+    const groundingRelevantCount =
+      relevantResults.length;
+
+    const groundingSourceCount =
+      sources.length;
+
+    const grounding =
+      enforceGroundedAnswer({
+        question:
+          content,
+
         answer,
+
         relevantResults,
+
         sources,
       });
+
+    answer =
+      grounding.answer;
+
+    sources =
+      grounding.sources;
+
+    let hasAnswer =
+      grounding.hasAnswer;
+
+    let groundingStatus:
+      | "not_required"
+      | "verified"
+      | "blocked" =
+        grounding.requiresKnowledge
+          ? grounding.hasAnswer
+            ? "verified"
+            : "blocked"
+          : "not_required";
+
+    let groundingVerifierStatus =
+      grounding.requiresKnowledge
+        ? grounding.hasAnswer
+          ? "pending"
+          : "not_run"
+        : "not_required";
+
+    let groundingVerifierReason =
+      "";
+
+    let groundingUnsupportedClaims:
+      string[] =
+        [];
+
+    let groundingVerifierModel =
+      "";
+
+    let groundingVerifierRequestId =
+      "";
+
+    /*
+     * ========================================
+     * Semantic Claim Verification
+     *
+     * فقط پاسخ‌های سازمانی که Hard Gate را
+     * عبور کرده‌اند بررسی دوم می‌شوند.
+     * ========================================
+     */
+
+    if (
+      hasAnswer &&
+      grounding.requiresKnowledge
+    ) {
+      stage =
+        "grounding_verification";
+
+      const verification =
+        await verifyGroundedAnswer({
+          question:
+            content,
+
+          answer,
+
+          retrievalResults,
+
+          citedFileIds,
+
+          sources,
+
+          minScore:
+            retrievalSettings.minScore,
+
+          userId:
+            account.id,
+
+          conversationId:
+            conversation.id,
+
+          messageId:
+            userMessage.id,
+
+          baseRequestId:
+            requestId,
+        });
+
+      groundingVerifierStatus =
+        verification.reason;
+
+      groundingVerifierReason =
+        verification.verifierReason ||
+        "";
+
+      groundingUnsupportedClaims =
+        verification
+          .unsupportedClaims;
+
+      groundingVerifierModel =
+        verification.model ||
+        "";
+
+      groundingVerifierRequestId =
+        verification
+          .verifierRequestId ||
+        "";
+
+      if (
+        verification.verified
+      ) {
+        groundingStatus =
+          "verified";
+
+        groundingVerifierStatus =
+          "supported";
+      } else {
+        groundingStatus =
+          "blocked";
+
+        console.warn(
+          "Chat answer rejected by semantic grounding verifier",
+          {
+            requestId,
+
+            conversationId:
+              conversation.id,
+
+            userMessageId:
+              userMessage.id,
+
+            groundingReason:
+              grounding.reason,
+
+            verificationReason:
+              verification.reason,
+
+            verifierReason:
+              verification.verifierReason,
+
+            unsupportedClaims:
+              verification
+                .unsupportedClaims,
+
+            verifierRequestId:
+              verification
+                .verifierRequestId,
+
+            verifierModel:
+              verification.model,
+          }
+        );
+
+        answer =
+          INSUFFICIENT_KNOWLEDGE_MESSAGE;
+
+        sources =
+          [];
+
+        hasAnswer =
+          false;
+      }
+    }
+
+    if (
+      !hasAnswer
+    ) {
+      groundingStatus =
+        "blocked";
+
+      console.warn(
+        "Chat answer blocked by grounding",
+        {
+          requestId,
+
+          conversationId:
+            conversation.id,
+
+          userMessageId:
+            userMessage.id,
+
+          reason:
+            grounding.reason,
+
+          requiresKnowledge:
+            grounding.requiresKnowledge,
+
+          retrievalResultCount:
+            groundingRetrievalCount,
+
+          relevantResultCount:
+            groundingRelevantCount,
+
+          sourceCount:
+            groundingSourceCount,
+
+          verifierStatus:
+            groundingVerifierStatus,
+        }
+      );
+    }
 
     /*
      * ========================================
@@ -1966,6 +2523,62 @@ export async function POST(
 
             response_time_ms:
               responseTime,
+
+            /*
+             * ==================================
+             * Grounding / Hallucination Metadata
+             * ==================================
+             */
+
+            grounding_status:
+              groundingStatus,
+
+            grounding_gate_reason:
+              grounding.reason,
+
+            grounding_verifier_status:
+              groundingVerifierStatus,
+
+            grounding_verifier_reason:
+              groundingVerifierReason
+                .trim()
+                .slice(
+                  0,
+                  1000
+                ),
+
+            grounding_unsupported_claims:
+              serializeGroundingUnsupportedClaims(
+                groundingUnsupportedClaims
+              ),
+
+            grounding_verifier_model:
+              groundingVerifierModel
+                .trim()
+                .slice(
+                  0,
+                  200
+                ),
+
+            grounding_verifier_request_id:
+              groundingVerifierRequestId
+                .trim()
+                .slice(
+                  0,
+                  128
+                ),
+
+            grounding_checked_at:
+              groundingCheckedAt,
+
+            grounding_retrieval_count:
+              groundingRetrievalCount,
+
+            grounding_relevant_count:
+              groundingRelevantCount,
+
+            grounding_source_count:
+              groundingSourceCount,
 
             sources:
               sources.map(
@@ -2219,122 +2832,6 @@ export async function POST(
             "AI_BUDGET_RESERVATION_COMPLETION_FAILED";
         }
       }
-    }
-
-    /*
-     * ========================================
-     * Topic Classification
-     *
-     * Classification عمداً بعد از ثبت Usage
-     * پاسخ اصلی اجرا می‌شود.
-     *
-     * در این لحظه Chat Request Lock هنوز در
-     * اختیار همین Request است؛ بنابراین یک Chat
-     * جدید برای همین User نمی‌تواند همزمان وارد
-     * AI شود و Budget Guard داخل Classification
-     * Usage پاسخ اصلی را نیز مشاهده می‌کند.
-     *
-     * اگر Accounting پاسخ اصلی ثبت نشده باشد،
-     * Classification اجرا نمی‌شود تا Usage ناقص
-     * باعث عبور اشتباه از Budget نشود.
-     * ========================================
-     */
-
-    if (
-      usageResult.ok &&
-      reservationCompleted
-    ) {
-      stage =
-        "classification";
-
-      try {
-        /*
-         * OpenAI اصلی ممکن است زمان‌بر بوده باشد.
-         * قبل از Classification دوباره TTL Lock
-         * را تمدید می‌کنیم و Ownership را نیز
-         * تأیید می‌کنیم.
-         */
-        await refreshChatRequestLock({
-          userId:
-            account.id,
-
-          requestId,
-        });
-
-        const classification =
-          await classifyUserMessage({
-            question:
-              content,
-
-            context:
-              history,
-
-            userId:
-              account.id,
-
-            conversationId:
-              conversation.id,
-
-            messageId:
-              userMessage.id,
-          });
-
-        if (
-          classification.status ===
-          "error"
-        ) {
-          console.warn(
-            "Topic classification completed with error status",
-            {
-              requestId,
-
-              userId:
-                account.id,
-
-              conversationId:
-                conversation.id,
-
-              messageId:
-                userMessage.id,
-            }
-          );
-        }
-      } catch (error) {
-        /*
-         * Classification نباید پاسخ اصلی Chat را
-         * خراب کند. خود classifyUserMessage نیز
-         * عمدتاً Error را به Result تبدیل می‌کند؛
-         * این Catch فقط Defense in depth است.
-         */
-        logStageError(
-          requestId,
-          stage,
-          error,
-          {
-            operation:
-              "classify_after_chat_usage",
-
-            messageId:
-              userMessage.id,
-          }
-        );
-      }
-    } else {
-      console.warn(
-        "Topic classification skipped because chat accounting or reservation completion failed",
-        {
-          requestId,
-
-          userId:
-            account.id,
-
-          conversationId:
-            conversation.id,
-
-          messageId:
-            userMessage.id,
-        }
-      );
     }
 
     /*
@@ -3012,6 +3509,7 @@ function estimateChatReservationInputTokens({
   vectorStoreId,
   maxResults,
   minScore,
+  fileSearchFilter,
 }: {
   model:
     string;
@@ -3030,6 +3528,11 @@ function estimateChatReservationInputTokens({
 
   minScore:
     number;
+
+  fileSearchFilter:
+    ReturnType<
+      typeof buildChatFileSearchFilter
+    >;
 }) {
   const serialized =
     JSON.stringify({
@@ -3052,16 +3555,8 @@ function estimateChatReservationInputTokens({
           max_num_results:
             maxResults,
 
-          filters: {
-            type:
-              "eq",
-
-            key:
-              "status",
-
-            value:
-              "published",
-          },
+          filters:
+            fileSearchFilter,
 
           ranking_options: {
             score_threshold:
@@ -3865,6 +4360,78 @@ async function resolveKnowledgeSources(
   }
 
   return sources;
+}
+
+/*
+ * ============================================
+ * Grounding Unsupported Claims
+ *
+ * Field در PocketBase از نوع Text است.
+ * JSON معتبر و حداکثر 4000 نویسه ذخیره
+ * می‌کنیم.
+ * ============================================
+ */
+
+function serializeGroundingUnsupportedClaims(
+  claims:
+    string[]
+) {
+  const normalized =
+    [
+      ...new Set(
+        claims
+          .map(
+            (
+              claim
+            ) =>
+              String(
+                claim ||
+                  ""
+              )
+                .replace(
+                  /[\u0000-\u001f\u007f]/g,
+                  " "
+                )
+                .replace(
+                  /\s+/g,
+                  " "
+                )
+                .trim()
+                .slice(
+                  0,
+                  450
+                )
+          )
+          .filter(
+            Boolean
+          )
+      ),
+    ]
+      .slice(
+        0,
+        8
+      );
+
+  while (
+    normalized.length >
+    0
+  ) {
+    const serialized =
+      JSON.stringify(
+        normalized
+      );
+
+    if (
+      serialized.length <=
+      4000
+    ) {
+      return serialized;
+    }
+
+    normalized.pop();
+  }
+
+  return "[]";
 }
 
 /*

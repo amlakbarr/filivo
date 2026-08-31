@@ -1,7 +1,3 @@
-import type {
-  RecordModel,
-} from "pocketbase";
-
 import {
   knowledgeApiError,
   knowledgeApiResponse,
@@ -103,11 +99,34 @@ export async function GET() {
             "topics"
           )
           .getFullList({
-            sort:
-              "name",
+            /*
+             * Topicهای غیرفعال نباید در فرم
+             * Knowledge قابل انتخاب باشند.
+             */
+            filter:
+              "active = true",
 
-            expand:
-              "parent",
+            /*
+             * ساختار فعلی topics تخت (Flat) است
+             * و parent ندارد.
+             *
+             * sort_order اولویت مدیریتی را مشخص
+             * می‌کند و name ترتیب پایدار ثانویه است.
+             */
+            sort:
+              "sort_order,name",
+
+            fields:
+              [
+                "id",
+                "name",
+                "code",
+                "description",
+                "active",
+                "sort_order",
+              ].join(
+                ","
+              ),
           }),
 
         pb
@@ -123,37 +142,22 @@ export async function GET() {
     /*
      * ========================================
      * Topics
+     *
+     * TopicOption هنوز parent_id / parent_name
+     * دارد تا Compatibility فرم فعلی حفظ شود،
+     * اما در Schema فعلی این مقادیر خالی هستند.
      * ========================================
      */
 
     const topics =
       topicRecords
-        .filter(
-          (
-            record
-          ) =>
-            record.active !==
-            false
-        )
         .map(
           (
             record
           ) => {
-            const parent =
-              expanded(
-                record,
-                "parent"
-              );
-
             const name =
               String(
                 record.name ||
-                  ""
-              ).trim();
-
-            const parentName =
-              String(
-                parent?.name ||
                   ""
               ).trim();
 
@@ -164,18 +168,13 @@ export async function GET() {
               name,
 
               parent_id:
-                String(
-                  record.parent ||
-                    ""
-                ),
+                "",
 
               parent_name:
-                parentName,
+                "",
 
               label:
-                parentName
-                  ? `${parentName} > ${name}`
-                  : name,
+                name,
             };
           }
         )
@@ -271,31 +270,6 @@ export async function GET() {
 
 /*
  * ============================================
- * Expanded Relation
- * ============================================
- */
-
-function expanded(
-  record:
-    RecordModel,
-
-  key:
-    string
-) {
-  const value =
-    record.expand?.[
-      key
-    ];
-
-  return Array.isArray(
-    value
-  )
-    ? value[0]
-    : value;
-}
-
-/*
- * ============================================
  * Safe Error Metadata
  * ============================================
  */
@@ -318,11 +292,17 @@ function safeErrorMetadata(
 
   const value =
     error as {
-      name?: unknown;
+      name?:
+        unknown;
 
-      status?: unknown;
+      message?:
+        unknown;
 
-      code?: unknown;
+      status?:
+        unknown;
+
+      code?:
+        unknown;
     };
 
   return {
@@ -330,6 +310,12 @@ function safeErrorMetadata(
       typeof value.name ===
       "string"
         ? value.name
+        : undefined,
+
+    message:
+      typeof value.message ===
+      "string"
+        ? value.message
         : undefined,
 
     status:

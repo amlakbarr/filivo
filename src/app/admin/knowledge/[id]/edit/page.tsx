@@ -1,60 +1,155 @@
 import KnowledgeForm from "@/components/admin/knowledge/KnowledgeForm";
 
-type PageProps = {
-  params: Promise<{
-    id: string;
-  }>;
+type Params = Promise<{
+  id:
+    string;
+}>;
 
-  searchParams: Promise<{
-    gapId?: string;
-    question?: string;
-  }>;
-};
+type SearchParams = Promise<{
+  gapId?:
+    string |
+    string[];
+
+  feedbackId?:
+    string |
+    string[];
+
+  question?:
+    string |
+    string[];
+}>;
 
 export default async function EditKnowledgePage({
   params,
   searchParams,
-}: PageProps) {
-  const { id } = await params;
-  const query = await searchParams;
+}: {
+  params:
+    Params;
+
+  searchParams:
+    SearchParams;
+}) {
+  const {
+    id:
+      rawKnowledgeId,
+  } = await params;
+
+  const query =
+    await searchParams;
+
+  const knowledgeId =
+    cleanRecordId(
+      rawKnowledgeId
+    );
+
+  const gapId =
+    cleanRecordId(
+      firstParam(
+        query.gapId
+      )
+    );
+
+  const feedbackId =
+    cleanRecordId(
+      firstParam(
+        query.feedbackId
+      )
+    );
+
+  const question =
+    cleanText(
+      firstParam(
+        query.question
+      ),
+      2000
+    );
 
   return (
     <KnowledgeForm
-      knowledgeId={id}
-      gapId={sanitizeId(query.gapId)}
-      gapQuestion={sanitizeText(
-        query.question,
-        4000
-      )}
+      knowledgeId={
+        knowledgeId
+      }
+
+      gapId={
+        gapId ||
+        undefined
+      }
+      gapQuestion={
+        gapId
+          ? question ||
+            undefined
+          : undefined
+      }
+
+      feedbackId={
+        feedbackId ||
+        undefined
+      }
+      feedbackQuestion={
+        feedbackId
+          ? question ||
+            undefined
+          : undefined
+      }
     />
   );
 }
 
-function sanitizeText(
-  value: string | undefined,
-  maxLength: number
+function firstParam(
+  value:
+    | string
+    | string[]
+    | undefined
 ) {
-  if (!value) {
-    return undefined;
+  if (
+    Array.isArray(
+      value
+    )
+  ) {
+    return value[0] ||
+      "";
   }
 
-  const result = value
-    .trim()
-    .slice(0, maxLength);
-
-  return result || undefined;
+  return value ||
+    "";
 }
 
-function sanitizeId(
-  value: string | undefined
+function cleanText(
+  value:
+    string,
+
+  maximumLength:
+    number
 ) {
-  if (!value) {
-    return undefined;
-  }
-
-  const result = value
+  return value
+    .replace(
+      /[\u0000-\u001f\u007f]/g,
+      " "
+    )
+    .replace(
+      /\s+/g,
+      " "
+    )
     .trim()
-    .slice(0, 100);
+    .slice(
+      0,
+      maximumLength
+    );
+}
 
-  return result || undefined;
+function cleanRecordId(
+  value:
+    string
+) {
+  const id =
+    String(
+      value ||
+        ""
+    ).trim();
+
+  return /^[a-zA-Z0-9_-]{1,64}$/.test(
+    id
+  )
+    ? id
+    : "";
 }

@@ -33,6 +33,56 @@ export function getChatRetrievalSettings() {
   };
 }
 
+export function buildChatFileSearchFilter(
+  topicId?: string | null
+) {
+  const topic =
+    String(
+      topicId || ""
+    ).trim();
+
+  if (!topic) {
+    return {
+      type:
+        "eq" as const,
+
+      key:
+        "status",
+
+      value:
+        "published",
+    };
+  }
+
+  return {
+    type:
+      "and" as const,
+
+    filters: [
+      {
+        type:
+          "eq" as const,
+
+        key:
+          "status",
+
+        value:
+          "published",
+      },
+      {
+        type:
+          "eq" as const,
+
+        key:
+          "topic",
+
+        value:
+          topic,
+      },
+    ],
+  };
+}
+
 export function extractFileSearchResults(
   output: OpenAI.Responses.ResponseOutputItem[]
 ) {

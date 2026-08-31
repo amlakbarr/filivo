@@ -13,10 +13,14 @@ import {
   useState,
 } from "react";
 
+import KnowledgeRichTextEditor from "@/components/admin/knowledge/KnowledgeRichTextEditor";
+
 import {
   StatusBadge,
   SyncBadge,
 } from "@/components/admin/knowledge/StatusBadge";
+
+import MarkdownContent from "@/components/common/MarkdownContent";
 
 import type {
   DepartmentOption,
@@ -69,6 +73,25 @@ type ResolveResponse =
       message: string;
     };
 
+type FeedbackResolveResponse =
+  | {
+      success: true;
+
+      alreadyResolved?: boolean;
+
+      feedback: {
+        id: string;
+        reviewStatus: string;
+        reviewNote?: string;
+        resolvedKnowledgeItem?: string;
+        reviewedAt?: string;
+      };
+    }
+  | {
+      success: false;
+      message: string;
+    };
+
 type Props = {
   knowledgeId?: string;
 
@@ -82,7 +105,18 @@ type Props = {
   gapTitle?: string;
   gapQuestion?: string;
   gapTopicId?: string;
+
+  /*
+   * Context مربوط به Feedback منفی
+   */
+
+  feedbackId?: string;
+  feedbackTitle?: string;
+  feedbackQuestion?: string;
+  feedbackTopicId?: string;
 };
+
+
 
 /*
  * =========================================
@@ -97,6 +131,11 @@ export default function KnowledgeForm({
   gapTitle,
   gapQuestion,
   gapTopicId,
+
+  feedbackId,
+  feedbackTitle,
+  feedbackQuestion,
+  feedbackTopicId,
 }: Props) {
   const router =
     useRouter();
@@ -109,6 +148,12 @@ export default function KnowledgeForm({
   const [
     loading,
     setLoading,
+  ] =
+    useState(true);
+
+  const [
+    lookupsLoading,
+    setLookupsLoading,
   ] =
     useState(true);
 
@@ -165,6 +210,17 @@ export default function KnowledgeForm({
     setTopic,
   ] =
     useState("");
+
+  const [
+    topicMenuOpen,
+    setTopicMenuOpen,
+  ] =
+    useState(false);
+
+  const topicMenuRef =
+    useRef<HTMLDivElement>(
+      null
+    );
 
   const [
     selectedDepartments,
@@ -241,30 +297,25 @@ export default function KnowledgeForm({
       true;
 
     async function load() {
-      try {
-        const [
-          lookupsResponse,
-          itemResponse,
-        ] =
-          await Promise.all([
-            fetch(
-              "/api/admin/knowledge/lookups",
-              {
-                cache:
-                  "no-store",
-              }
-            ),
+      setLookupsLoading(
+        true
+      );
 
-            knowledgeId
-              ? fetch(
-                  `/api/admin/knowledge/${knowledgeId}`,
-                  {
-                    cache:
-                      "no-store",
-                  }
-                )
-              : null,
-          ]);
+      try {
+        /*
+         * =====================================
+         * Lookups را مستقل و در اولویت می‌گیریم
+         * =====================================
+         */
+
+        const lookupsResponse =
+          await fetch(
+            "/api/admin/knowledge/lookups",
+            {
+              cache:
+                "no-store",
+            }
+          );
 
         const lookups =
           (await lookupsResponse.json()) as
@@ -295,9 +346,13 @@ export default function KnowledgeForm({
           lookups.departments
         );
 
+        setLookupsLoading(
+          false
+        );
+
         /*
          * =====================================
-         * Prefill از Knowledge Gap
+         * Prefill از Gap / Feedback
          * فقط برای Knowledge جدید
          * =====================================
          */
@@ -305,26 +360,37 @@ export default function KnowledgeForm({
         if (
           !knowledgeId
         ) {
+          const prefillTitle =
+            gapTitle ||
+            feedbackTitle ||
+            feedbackQuestion ||
+            "";
+
           if (
-            gapTitle
+            prefillTitle
           ) {
             setTitle(
-              gapTitle
+              prefillTitle
             );
           }
 
+          const prefillTopicId =
+            gapTopicId ||
+            feedbackTopicId ||
+            "";
+
           if (
-            gapTopicId &&
+            prefillTopicId &&
             lookups.topics.some(
               (
                 option
               ) =>
                 option.id ===
-                gapTopicId
+                prefillTopicId
             )
           ) {
             setTopic(
-              gapTopicId
+              prefillTopicId
             );
           }
         }
@@ -336,8 +402,17 @@ export default function KnowledgeForm({
          */
 
         if (
-          itemResponse
+          knowledgeId
         ) {
+          const itemResponse =
+            await fetch(
+              `/api/admin/knowledge/${knowledgeId}`,
+              {
+                cache:
+                  "no-store",
+              }
+            );
+
           const itemData =
             (await itemResponse.json()) as
               | ItemResponse
@@ -402,6 +477,10 @@ export default function KnowledgeForm({
         }
       } finally {
         if (active) {
+          setLookupsLoading(
+            false
+          );
+
           setLoading(
             false
           );
@@ -417,8 +496,91 @@ export default function KnowledgeForm({
     };
   }, [
     knowledgeId,
+
     gapTitle,
     gapTopicId,
+
+    feedbackTitle,
+    feedbackQuestion,
+    feedbackTopicId,
+  ]);
+
+  /*
+   * =========================================
+   * Topic menu
+   *
+   * Native <select> در بعضی مرورگرها/محیط‌های
+   * RTL رفتار ناپایداری داشت. این منوی کنترل‌شده
+   * با یک کلیک باز می‌شود و با کلیک بیرون یا Esc
+   * بسته خواهد شد.
+   * =========================================
+   */
+
+  useEffect(() => {
+    if (
+      !topicMenuOpen
+    ) {
+      return;
+    }
+
+    function handleMouseDown(
+      event:
+        MouseEvent
+    ) {
+      const target =
+        event.target;
+
+      if (
+        target instanceof
+          Node &&
+        topicMenuRef.current &&
+        !topicMenuRef.current.contains(
+          target
+        )
+      ) {
+        setTopicMenuOpen(
+          false
+        );
+      }
+    }
+
+    function handleKeyDown(
+      event:
+        globalThis.KeyboardEvent
+    ) {
+      if (
+        event.key ===
+        "Escape"
+      ) {
+        setTopicMenuOpen(
+          false
+        );
+      }
+    }
+
+    document.addEventListener(
+      "mousedown",
+      handleMouseDown
+    );
+
+    document.addEventListener(
+      "keydown",
+      handleKeyDown
+    );
+
+    return () => {
+      document.removeEventListener(
+        "mousedown",
+        handleMouseDown
+      );
+
+      document.removeEventListener(
+        "keydown",
+        handleKeyDown
+      );
+    };
+  }, [
+    topicMenuOpen,
   ]);
 
   /*
@@ -615,6 +777,87 @@ export default function KnowledgeForm({
 
   /*
    * =========================================
+   * Resolve Feedback
+   * =========================================
+   */
+
+  async function resolveFeedback(
+    knowledgeItemId: string
+  ): Promise<{
+    success: boolean;
+    message?: string;
+  }> {
+    if (
+      !feedbackId
+    ) {
+      return {
+        success:
+          false,
+
+        message:
+          "Feedback مشخص نیست.",
+      };
+    }
+
+    try {
+      const response =
+        await fetch(
+          "/api/admin/analytics/feedback/" +
+            feedbackId +
+            "/resolve",
+          {
+            method:
+              "POST",
+
+            headers: {
+              "Content-Type":
+                "application/json",
+            },
+
+            body:
+              JSON.stringify({
+                knowledgeItemId,
+              }),
+          }
+        );
+
+      const data =
+        (await response.json()) as
+          FeedbackResolveResponse;
+
+      if (
+        !response.ok ||
+        !data.success
+      ) {
+        return {
+          success:
+            false,
+
+          message:
+            "message" in
+            data
+              ? data.message
+              : "بستن Feedback انجام نشد.",
+        };
+      }
+
+      return {
+        success:
+          true,
+      };
+    } catch {
+      return {
+        success:
+          false,
+
+        message:
+          "ارتباط با سرویس رسیدگی Feedback برقرار نشد.",
+      };
+    }
+  }
+
+  /*
+   * =========================================
    * Save / Publish
    * =========================================
    */
@@ -767,38 +1010,61 @@ export default function KnowledgeForm({
 
       /*
        * =====================================
-       * Resolve Gap
-       * فقط اگر:
+       * Resolve Origin Context
        *
-       * - از Gap آمده باشیم
-       * - Published باشد
-       * - Sync واقعی موفق باشد
+       * Gap و Feedback فقط بعد از
+       * Publish + Sync موفق بسته می‌شوند.
        * =====================================
        */
 
       let gapResolved =
         false;
 
-      let resolveMessage:
+      let gapResolveMessage:
+        | string
+        | undefined;
+
+      let feedbackResolved =
+        false;
+
+      let feedbackResolveMessage:
         | string
         | undefined;
 
       if (
-        gapId &&
         status ===
           "published" &&
         syncSucceeded
       ) {
-        const result =
-          await resolveGap(
-            data.item.id
-          );
+        if (
+          gapId
+        ) {
+          const result =
+            await resolveGap(
+              data.item.id
+            );
 
-        gapResolved =
-          result.success;
+          gapResolved =
+            result.success;
 
-        resolveMessage =
-          result.message;
+          gapResolveMessage =
+            result.message;
+        }
+
+        if (
+          feedbackId
+        ) {
+          const result =
+            await resolveFeedback(
+              data.item.id
+            );
+
+          feedbackResolved =
+            result.success;
+
+          feedbackResolveMessage =
+            result.message;
+        }
       }
 
       /*
@@ -822,22 +1088,73 @@ export default function KnowledgeForm({
             "مطلب ذخیره شد، اما همگام‌سازی با پایگاه دانش ناموفق بود.",
         });
       } else if (
-        gapId &&
         status ===
           "published" &&
         syncSucceeded &&
-        !gapResolved
+        (
+          (
+            gapId &&
+            !gapResolved
+          ) ||
+          (
+            feedbackId &&
+            !feedbackResolved
+          )
+        )
       ) {
+        const failures =
+          [
+            gapId &&
+            !gapResolved
+              ? (
+                  "Knowledge Gap حل نشد." +
+                  (
+                    gapResolveMessage
+                      ? " " +
+                        gapResolveMessage
+                      : ""
+                  )
+                )
+              : "",
+
+            feedbackId &&
+            !feedbackResolved
+              ? (
+                  "Feedback بسته نشد." +
+                  (
+                    feedbackResolveMessage
+                      ? " " +
+                        feedbackResolveMessage
+                      : ""
+                  )
+                )
+              : "",
+          ]
+            .filter(
+              Boolean
+            )
+            .join(
+              " "
+            );
+
         setNotice({
           type:
             "error",
 
           text:
-            `مطلب منتشر و همگام شد، اما Knowledge Gap حل نشد.${
-              resolveMessage
-                ? ` ${resolveMessage}`
-                : ""
-            }`,
+            "مطلب منتشر و همگام شد، اما عملیات تکمیلی کامل نشد. " +
+            failures,
+        });
+      } else if (
+        gapResolved &&
+        feedbackResolved
+      ) {
+        setNotice({
+          type:
+            "success",
+
+          text:
+            "مطلب منتشر و همگام شد؛ Knowledge Gap و Feedback هر دو با موفقیت بسته شدند.",
         });
       } else if (
         gapResolved
@@ -850,7 +1167,20 @@ export default function KnowledgeForm({
             "مطلب منتشر و همگام شد و Knowledge Gap با موفقیت حل شد.",
         });
       } else if (
-        gapId &&
+        feedbackResolved
+      ) {
+        setNotice({
+          type:
+            "success",
+
+          text:
+            "مطلب منتشر و همگام شد و Feedback منفی با موفقیت رفع‌شده ثبت شد.",
+        });
+      } else if (
+        (
+          gapId ||
+          feedbackId
+        ) &&
         status ===
           "draft"
       ) {
@@ -859,7 +1189,12 @@ export default function KnowledgeForm({
             "success",
 
           text:
-            "پیش‌نویس ذخیره شد. Knowledge Gap تا زمان انتشار و همگام‌سازی موفق باز می‌ماند.",
+            gapId &&
+            feedbackId
+              ? "پیش‌نویس ذخیره شد. Knowledge Gap و Feedback تا زمان انتشار و همگام‌سازی موفق باز می‌مانند."
+              : gapId
+                ? "پیش‌نویس ذخیره شد. Knowledge Gap تا زمان انتشار و همگام‌سازی موفق باز می‌ماند."
+                : "پیش‌نویس ذخیره شد. Feedback تا زمان انتشار و همگام‌سازی موفق باز می‌ماند.",
         });
       } else {
         setNotice({
@@ -878,11 +1213,6 @@ export default function KnowledgeForm({
        * =====================================
        */
 
-      /*
-       * Gap حل شده:
-       * به صفحه همان Gap برگرد.
-       */
-
       if (
         gapResolved &&
         gapId
@@ -890,7 +1220,23 @@ export default function KnowledgeForm({
         window.setTimeout(
           () =>
             router.replace(
-              `/admin/knowledge/gaps/${gapId}`
+              "/admin/knowledge/gaps/" +
+                gapId
+            ),
+          900
+        );
+
+        return;
+      }
+
+      if (
+        feedbackResolved &&
+        feedbackId
+      ) {
+        window.setTimeout(
+          () =>
+            router.replace(
+              "/admin/analytics/feedback?review=resolved"
             ),
           900
         );
@@ -899,13 +1245,28 @@ export default function KnowledgeForm({
       }
 
       /*
-       * Knowledge جدید ساخته شده ولی Gap
-       * هنوز حل نشده؛ مثلاً Draft بوده
-       * یا Sync شکست خورده.
-       *
-       * به Edit برو ولی gapId را حفظ کن.
+       * Knowledge جدید عادی:
+       * بعد از ثبت موفق مستقیماً به فهرست
+       * پایگاه دانش برگرد.
        */
+      if (
+        !knowledgeId &&
+        !gapId &&
+        !feedbackId
+      ) {
+        router.replace(
+          "/admin/knowledge"
+        );
 
+        return;
+      }
+
+      /*
+       * Knowledge جدیدی که از Gap یا Feedback
+       * آمده ولی Context هنوز بسته نشده است
+       * (Draft یا Sync/Resolve ناموفق):
+       * به Edit برو و Context را نگه دار.
+       */
       if (
         !knowledgeId
       ) {
@@ -915,7 +1276,9 @@ export default function KnowledgeForm({
               buildEditHref(
                 data.item.id,
                 gapId,
-                gapQuestion
+                gapQuestion,
+                feedbackId,
+                feedbackQuestion
               )
             ),
           700
@@ -988,7 +1351,9 @@ export default function KnowledgeForm({
             href={
               gapId
                 ? `/admin/knowledge/gaps/${gapId}`
-                : "/admin/knowledge"
+                : feedbackId
+                  ? "/admin/analytics/feedback"
+                  : "/admin/knowledge"
             }
             className="text-sm font-bold text-emerald-700 hover:text-emerald-800"
           >
@@ -996,7 +1361,9 @@ export default function KnowledgeForm({
             {" "}
             {gapId
               ? "بازگشت به Knowledge Gap"
-              : "بازگشت به فهرست"}
+              : feedbackId
+                ? "بازگشت به Feedback"
+                : "بازگشت به فهرست"}
           </Link>
 
           <h1 className="mt-2 text-2xl font-black sm:text-3xl">
@@ -1081,6 +1448,45 @@ export default function KnowledgeForm({
               className="shrink-0 text-xs font-black text-amber-800 underline underline-offset-4"
             >
               مشاهده Gap
+            </Link>
+
+          </div>
+
+        </div>
+      )}
+
+      {/* Feedback Context */}
+
+      {feedbackId && (
+        <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4 sm:p-5">
+
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+
+            <div>
+
+              <p className="text-xs font-black text-indigo-700">
+                این مطلب برای رفع یک Feedback منفی ایجاد شده است
+              </p>
+
+              {feedbackQuestion && (
+                <p className="mt-2 whitespace-pre-wrap text-sm font-medium leading-7 text-indigo-950">
+                  سؤال کارشناس:
+                  {" "}
+                  {feedbackQuestion}
+                </p>
+              )}
+
+              <p className="mt-2 text-xs leading-6 text-indigo-700">
+                Feedback فقط بعد از انتشار و همگام‌سازی موفق این مطلب به حالت رفع‌شده می‌رود.
+              </p>
+
+            </div>
+
+            <Link
+              href="/admin/analytics/feedback"
+              className="shrink-0 text-xs font-black text-indigo-800 underline underline-offset-4"
+            >
+              مشاهده Feedbackها
             </Link>
 
           </div>
@@ -1238,29 +1644,25 @@ export default function KnowledgeForm({
               }
             >
 
-              <textarea
+              <KnowledgeRichTextEditor
                 value={
                   content
                 }
                 onChange={(
-                  event
+                  value
                 ) =>
                   setContent(
-                    event.target
-                      .value
+                    value.slice(
+                      0,
+                      200000
+                    )
                   )
                 }
-                rows={
-                  14
-                }
-                maxLength={
-                  200000
-                }
-                className={`${inputClass(
+                error={
                   Boolean(
                     fieldErrors.content
                   )
-                )} resize-y leading-8`}
+                }
                 placeholder="پاسخ و محتوای دقیق، رسمی و قابل استناد شرکت را وارد کنید..."
               />
 
@@ -1349,60 +1751,186 @@ export default function KnowledgeForm({
 
           <div className="grid gap-5 md:grid-cols-2">
 
-            <Field
-              label="موضوع"
-              error={
-                fieldErrors.topic
-              }
-            >
+            <div className="block">
 
-              <select
-                value={
-                  topic
+              <span className="mb-2 flex items-center gap-1 text-sm font-black text-slate-700">
+                موضوع
+              </span>
+
+              <div
+                ref={
+                  topicMenuRef
                 }
-                onChange={(
-                  event
-                ) =>
-                  setTopic(
-                    event.target
-                      .value
-                  )
-                }
-                className={
-                  inputClass(
+                className="relative"
+              >
+
+                <button
+                  type="button"
+                  disabled={
+                    lookupsLoading
+                  }
+                  aria-haspopup="listbox"
+                  aria-expanded={
+                    topicMenuOpen
+                  }
+                  onClick={() =>
+                    setTopicMenuOpen(
+                      (
+                        value
+                      ) =>
+                        !value
+                    )
+                  }
+                  className={`${inputClass(
                     Boolean(
                       fieldErrors.topic
                     )
-                  )
-                }
-              >
+                  )} flex items-center justify-between gap-3 text-right disabled:cursor-wait disabled:bg-slate-100 disabled:text-slate-400`}
+                >
 
-                <option value="">
-                  بدون موضوع
-                </option>
+                  <span className="min-w-0 flex-1 truncate">
+                    {lookupsLoading
+                      ? "در حال بارگذاری موضوعات..."
+                      : topic
+                        ? topics.find(
+                            (
+                              option
+                            ) =>
+                              option.id ===
+                              topic
+                          )?.label ||
+                          "موضوع انتخاب‌شده"
+                        : "بدون موضوع"}
+                  </span>
 
-                {topics.map(
-                  (
-                    option
-                  ) => (
-                    <option
-                      key={
-                        option.id
+                  <span
+                    aria-hidden="true"
+                    className={`shrink-0 text-slate-400 transition-transform ${
+                      topicMenuOpen
+                        ? "rotate-180"
+                        : ""
+                    }`}
+                  >
+                   ⌄
+                  </span>
+
+                </button>
+
+                {topicMenuOpen &&
+                  !lookupsLoading && (
+                  <div
+                    role="listbox"
+                    className="absolute inset-x-0 top-full z-50 mt-2 max-h-64 overflow-y-auto rounded-xl border border-slate-200 bg-white p-1.5 shadow-xl"
+                  >
+
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={
+                        !topic
                       }
-                      value={
-                        option.id
-                      }
+                      onClick={() => {
+                        setTopic(
+                          ""
+                        );
+
+                        setTopicMenuOpen(
+                          false
+                        );
+                      }}
+                      className={`flex w-full items-center justify-between rounded-lg px-3 py-2.5 text-right text-sm transition ${
+                        !topic
+                          ? "bg-emerald-50 font-black text-emerald-700"
+                          : "text-slate-700 hover:bg-slate-50"
+                      }`}
                     >
-                      {
-                        option.label
-                      }
-                    </option>
-                  )
+                      <span>
+                        بدون موضوع
+                      </span>
+
+                      {!topic && (
+                        <span
+                          aria-hidden="true"
+                          className="text-emerald-600"
+                        >
+                          ✓
+                        </span>
+                      )}
+                    </button>
+
+                    {topics.length >
+                    0 ? (
+                      topics.map(
+                        (
+                          option
+                        ) => {
+                          const selected =
+                            option.id ===
+                            topic;
+
+                          return (
+                            <button
+                              key={
+                                option.id
+                              }
+                              type="button"
+                              role="option"
+                              aria-selected={
+                                selected
+                              }
+                              onClick={() => {
+                                setTopic(
+                                  option.id
+                                );
+
+                                setTopicMenuOpen(
+                                  false
+                                );
+                              }}
+                              className={`flex w-full items-center justify-between gap-3 rounded-lg px-3 py-2.5 text-right text-sm transition ${
+                                selected
+                                  ? "bg-emerald-50 font-black text-emerald-700"
+                                  : "text-slate-700 hover:bg-slate-50"
+                              }`}
+                            >
+                              <span className="min-w-0 flex-1">
+                                {
+                                  option.label
+                                }
+                              </span>
+
+                              {selected && (
+                                <span
+                                  aria-hidden="true"
+                                  className="shrink-0 text-emerald-600"
+                                >
+                                  ✓
+                                </span>
+                              )}
+                            </button>
+                          );
+                        }
+                      )
+                    ) : (
+                      <p className="px-3 py-3 text-xs text-slate-400">
+                        موضوع فعالی ثبت نشده است.
+                      </p>
+                    )}
+
+                  </div>
                 )}
 
-              </select>
+              </div>
 
-            </Field>
+              {fieldErrors.topic && (
+                <span className="mt-1 block text-xs font-bold text-rose-600">
+                  {
+                    fieldErrors.topic
+                  }
+                </span>
+              )}
+
+            </div>
 
             <Field
               label="واحدها"
@@ -1580,7 +2108,9 @@ export default function KnowledgeForm({
                 ? "در حال انتشار..."
                 : gapId
                   ? "انتشار و حل Gap"
-                  : "انتشار"}
+                  : feedbackId
+                    ? "انتشار و رفع Feedback"
+                    : "انتشار"}
             </button>
 
           </div>
@@ -1617,15 +2147,23 @@ export default function KnowledgeForm({
               </p>
             )}
 
-            <div className="mt-6 whitespace-pre-wrap break-words border-t border-slate-100 pt-6 text-sm leading-8 text-slate-700">
+            <div className="mt-6 break-words border-t border-slate-100 pt-6 text-sm leading-8 text-slate-700">
 
               {sourceType ===
-              "text"
-                ? content ||
-                  "محتوایی برای پیش‌نمایش وارد نشده است."
-                : file?.name ||
-                  item?.attachment ||
-                  "فایلی انتخاب نشده است."}
+              "text" ? (
+                <MarkdownContent
+                  content={
+                    content ||
+                    "محتوایی برای پیش‌نمایش وارد نشده است."
+                  }
+                />
+              ) : (
+                <p>
+                  {file?.name ||
+                    item?.attachment ||
+                    "فایلی انتخاب نشده است."}
+                </p>
+              )}
 
             </div>
 
@@ -1762,31 +2300,64 @@ function buildEditHref(
     string,
 
   gapQuestion?:
+    string,
+
+  feedbackId?:
+    string,
+
+  feedbackQuestion?:
     string
 ) {
   const base =
-    `/admin/knowledge/${knowledgeItemId}/edit`;
+    "/admin/knowledge/" +
+    knowledgeItemId +
+    "/edit";
 
-  if (!gapId) {
+  if (
+    !gapId &&
+    !feedbackId
+  ) {
     return base;
   }
 
   const params =
     new URLSearchParams();
 
-  params.set(
-    "gapId",
-    gapId
-  );
-
   if (
-    gapQuestion
+    gapId
   ) {
     params.set(
-      "question",
-      gapQuestion
+      "gapId",
+      gapId
     );
   }
 
-  return `${base}?${params.toString()}`;
+  if (
+    feedbackId
+  ) {
+    params.set(
+      "feedbackId",
+      feedbackId
+    );
+  }
+
+  const question =
+    gapQuestion ||
+    feedbackQuestion ||
+    "";
+
+  if (
+    question
+  ) {
+    params.set(
+      "question",
+      question
+    );
+  }
+
+  return (
+    base +
+    "?" +
+    params.toString()
+  );
 }

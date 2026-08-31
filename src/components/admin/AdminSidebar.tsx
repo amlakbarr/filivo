@@ -1,55 +1,127 @@
 "use client";
 
 import Link from "next/link";
+
 import {
   usePathname,
   useRouter,
 } from "next/navigation";
-import { useState } from "react";
+
+import {
+  useState,
+} from "react";
 
 const navigation = [
   {
-    href: "/admin",
-    label: "داشبورد",
-    icon: "⌂",
-    exact: true,
+    href:
+      "/admin",
+
+    label:
+      "داشبورد",
+
+    icon:
+      "⌂",
+
+    exact:
+      true,
   },
   {
-    href: "/admin/knowledge",
-    label: "پایگاه دانش",
-    icon: "◫",
+    href:
+      "/admin/knowledge",
+
+    label:
+      "پایگاه دانش",
+
+    icon:
+      "◫",
   },
   {
-    href: "/admin/topics",
-    label: "موضوعات",
-    icon: "⌘",
+    href:
+      "/admin/topics",
+
+    label:
+      "موضوعات",
+
+    icon:
+      "⌘",
   },
   {
-    href: "/admin/accounts",
-    label: "کارشناسان",
-    icon: "♙",
+    href:
+      "/admin/conversations",
+
+    label:
+      "مکالمات",
+
+    icon:
+      "◉",
   },
   {
-    href: "/admin/analytics/topics",
-    label: "تحلیل موضوعی",
-    icon: "◈",
+    href:
+      "/admin/accounts",
+
+    label:
+      "کارشناسان",
+
+    icon:
+      "♙",
   },
   {
-    href: "/admin/reports",
-    label: "گزارش‌ها",
-    icon: "⌁",
+    href:
+      "/admin/analytics/topics",
+
+    label:
+      "تحلیل موضوعی",
+
+    icon:
+      "◈",
   },
   {
-    href: "/admin/audit",
-    label: "گزارش امنیتی",
-    icon: "◇",
+    href:
+      "/admin/analytics/feedback",
+
+    label:
+      "کیفیت پاسخ‌ها",
+
+    icon:
+      "◎",
+  },
+  {
+  href:
+    "/admin/analytics/grounding",
+
+  label:
+    "کنترل صحت AI",
+
+  icon:
+    "⊙",
+},
+  {
+    href:
+      "/admin/reports",
+
+    label:
+      "گزارش‌ها",
+
+    icon:
+      "⌁",
+  },
+  {
+    href:
+      "/admin/audit",
+
+    label:
+      "گزارش امنیتی",
+
+    icon:
+      "◇",
   },
 ] as const;
 
 export default function AdminSidebar({
   accountName,
 }: {
-  accountName: string;
+  accountName:
+    string;
 }) {
   const pathname =
     usePathname();
@@ -60,25 +132,36 @@ export default function AdminSidebar({
   const [
     menuOpen,
     setMenuOpen,
-  ] = useState(false);
+  ] =
+    useState(
+      false
+    );
 
   const [
     loggingOut,
     setLoggingOut,
-  ] = useState(false);
+  ] =
+    useState(
+      false
+    );
 
   async function logout() {
-    if (loggingOut) {
+    if (
+      loggingOut
+    ) {
       return;
     }
 
-    setLoggingOut(true);
+    setLoggingOut(
+      true
+    );
 
     try {
       await fetch(
         "/api/auth/logout",
         {
-          method: "POST",
+          method:
+            "POST",
         }
       );
 
@@ -88,7 +171,9 @@ export default function AdminSidebar({
 
       router.refresh();
     } finally {
-      setLoggingOut(false);
+      setLoggingOut(
+        false
+      );
     }
   }
 
@@ -99,6 +184,7 @@ export default function AdminSidebar({
       <header className="sticky top-0 z-30 flex items-center justify-between border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur lg:hidden">
 
         <div>
+
           <p className="text-sm font-black text-slate-900">
             مرکز مدیریت
           </p>
@@ -107,13 +193,16 @@ export default function AdminSidebar({
             {accountName ||
               "مدیر سیستم"}
           </p>
+
         </div>
 
         <button
           type="button"
           onClick={() =>
             setMenuOpen(
-              (open) =>
+              (
+                open
+              ) =>
                 !open
             )
           }
@@ -162,6 +251,7 @@ export default function AdminSidebar({
           </div>
 
           <div>
+
             <p className="font-black text-slate-950">
               مرکز مدیریت
             </p>
@@ -169,6 +259,7 @@ export default function AdminSidebar({
             <p className="text-xs text-slate-500">
               دستیار هوشمند سازمانی
             </p>
+
           </div>
 
         </div>
@@ -176,19 +267,26 @@ export default function AdminSidebar({
         {/* Navigation */}
 
         <nav
-          className="space-y-1.5"
+          className="space-y-1.5 overflow-y-auto"
           aria-label="منوی مدیریت"
         >
+
           {navigation.map(
-            (item) => {
+            (
+              item
+            ) => {
               const active =
                 "exact" in
                   item &&
                 item.exact
                   ? pathname ===
                     item.href
-                  : pathname.startsWith(
-                      item.href
+                  : (
+                      pathname ===
+                        item.href ||
+                      pathname.startsWith(
+                        `${item.href}/`
+                      )
                     );
 
               return (
@@ -204,14 +302,20 @@ export default function AdminSidebar({
                       false
                     )
                   }
+                  aria-current={
+                    active
+                      ? "page"
+                      : undefined
+                  }
                   className={`flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-bold transition ${
                     active
                       ? "bg-emerald-50 text-emerald-700"
                       : "text-slate-600 hover:bg-slate-50 hover:text-slate-950"
                   }`}
                 >
+
                   <span
-                    className="grid size-7 place-items-center text-lg"
+                    className="grid size-7 shrink-0 place-items-center text-lg"
                     aria-hidden
                   >
                     {
@@ -219,13 +323,17 @@ export default function AdminSidebar({
                     }
                   </span>
 
-                  {
-                    item.label
-                  }
+                  <span className="min-w-0 truncate">
+                    {
+                      item.label
+                    }
+                  </span>
+
                 </Link>
               );
             }
           )}
+
         </nav>
 
         {/* Footer */}
@@ -247,13 +355,23 @@ export default function AdminSidebar({
 
           <Link
             href="/chat"
-            className="flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-bold text-slate-600 hover:bg-slate-50"
+            onClick={() =>
+              setMenuOpen(
+                false
+              )
+            }
+            className="flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-bold text-slate-600 transition hover:bg-slate-50"
           >
-            <span className="grid size-7 place-items-center text-lg">
+
+            <span
+              className="grid size-7 place-items-center text-lg"
+              aria-hidden
+            >
               ↩
             </span>
 
             بازگشت به چت
+
           </Link>
 
           <button
@@ -264,20 +382,26 @@ export default function AdminSidebar({
             disabled={
               loggingOut
             }
-            className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm font-bold text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+            className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm font-bold text-rose-600 transition hover:bg-rose-50 disabled:opacity-50"
           >
-            <span className="grid size-7 place-items-center text-lg">
+
+            <span
+              className="grid size-7 place-items-center text-lg"
+              aria-hidden
+            >
               ⇥
             </span>
 
             {loggingOut
               ? "در حال خروج..."
               : "خروج"}
+
           </button>
 
         </div>
 
       </aside>
+
     </>
   );
 }

@@ -1,3 +1,7 @@
+import {
+  after,
+} from "next/server";
+
 import type PocketBase from "pocketbase";
 
 import {
@@ -12,6 +16,10 @@ import {
   syncKnowledgeItem,
   type KnowledgeItemRecord,
 } from "@/lib/ai/knowledge";
+
+import {
+  runKnowledgeTriggeredEvals,
+} from "@/lib/ai/knowledge-eval-trigger";
 
 import {
   KNOWLEDGE_STATUSES,
@@ -947,6 +955,58 @@ export async function POST(
 
       syncAuditWritten =
         true;
+    }
+
+    /*
+     * ========================================
+     * Automatic Golden Tests
+     *
+     * فقط بعد از Publish + Sync موفق.
+     * after() باعث می‌شود Response منتظر
+     * اجرای Eval نماند.
+     * ========================================
+     */
+
+    if (
+      parsed.data.status ===
+        "published" &&
+      sync?.success ===
+        true
+    ) {
+      const knowledgeId =
+        created.id;
+
+      const adminId =
+        admin.account.id;
+
+      after(
+        async () => {
+          try {
+            await runKnowledgeTriggeredEvals({
+              knowledgeId,
+
+              adminId,
+
+              trigger:
+                "publish",
+            });
+          } catch (error) {
+            console.error(
+              "Automatic knowledge publish eval failed",
+              {
+                knowledgeId,
+
+                adminId,
+
+                error:
+                  safeErrorMetadata(
+                    error
+                  ),
+              }
+            );
+          }
+        }
+      );
     }
 
     /*

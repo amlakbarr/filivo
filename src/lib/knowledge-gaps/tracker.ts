@@ -1,9 +1,18 @@
 import {
   ClientResponseError,
-  RecordModel,
+  type RecordModel,
 } from "pocketbase";
 
-import { getAdminPocketBase } from "@/lib/pocketbase/admin";
+import {
+  calculateKnowledgeGapPriority,
+  isOperationalKnowledgeGapGroundingBlock,
+  summarizeKnowledgeGapGroundingRisk,
+  type KnowledgeGapGroundingMessage,
+} from "@/lib/knowledge-gaps/priority";
+
+import {
+  getAdminPocketBase,
+} from "@/lib/pocketbase/admin";
 
 type GapType =
   | "no_answer"
@@ -11,33 +20,55 @@ type GapType =
   | "both";
 
 type TrackKnowledgeGapInput = {
-  userMessageId: string;
-  assistantMessageId: string;
+  userMessageId:
+    string;
+
+  assistantMessageId:
+    string;
 };
 
 type TrackKnowledgeGapResult =
   | {
-      tracked: true;
-      gapId: string;
-      occurrenceId: string;
+      tracked:
+        true;
+
+      gapId:
+        string;
+
+      occurrenceId:
+        string;
     }
   | {
-      tracked: false;
-      reason: string;
+      tracked:
+        false;
+
+      reason:
+        string;
     };
 
 type CreateGapInput = {
-  normalizedKey: string;
-  questionText: string;
-  topicId: string;
-  gapType: GapType;
+  normalizedKey:
+    string;
+
+  questionText:
+    string;
+
+  topicId:
+    string;
+
+  gapType:
+    GapType;
 };
 
-type PriorityInput = {
-  occurrenceCount: number;
-  uniqueUsers: number;
-  uniqueDepartments: number;
-};
+/*
+ * برای جلوگیری از Query نامحدود هنگام محاسبه
+ * Risk، فقط آخرین Occurrenceها بررسی می‌شوند.
+ *
+ * occurrence_count همچنان تعداد کل تکرارها را
+ * در Priority لحاظ می‌کند.
+ */
+const MAX_RISK_OCCURRENCES =
+  500;
 
 /*
  * =========================================
@@ -46,7 +77,8 @@ type PriorityInput = {
  */
 
 export async function trackKnowledgeGap(
-  input: TrackKnowledgeGapInput
+  input:
+    TrackKnowledgeGapInput
 ): Promise<TrackKnowledgeGapResult> {
   const pb =
     await getAdminPocketBase();
@@ -59,34 +91,55 @@ export async function trackKnowledgeGap(
       input.userMessageId
     );
 
-  if (existingOccurrence) {
+  if (
+    existingOccurrence
+  ) {
     return {
-      tracked: false,
-      reason: "already_tracked",
+      tracked:
+        false,
+
+      reason:
+        "already_tracked",
     };
   }
 
   /*
    * گرفتن پیام کاربر
    */
-  const userMessage = await pb
-    .collection("messages")
-    .getOne(input.userMessageId);
+  const userMessage =
+    await pb
+      .collection(
+        "messages"
+      )
+      .getOne(
+        input.userMessageId
+      );
 
   /*
    * گرفتن پاسخ Assistant
    */
-  const assistantMessage = await pb
-    .collection("messages")
-    .getOne(input.assistantMessageId);
+  const assistantMessage =
+    await pb
+      .collection(
+        "messages"
+      )
+      .getOne(
+        input.assistantMessageId
+      );
 
   /*
    * Validation نقش‌ها
    */
-  if (userMessage.role !== "user") {
+  if (
+    userMessage.role !==
+    "user"
+  ) {
     return {
-      tracked: false,
-      reason: "invalid_user_message",
+      tracked:
+        false,
+
+      reason:
+        "invalid_user_message",
     };
   }
 
@@ -95,7 +148,9 @@ export async function trackKnowledgeGap(
     "assistant"
   ) {
     return {
-      tracked: false,
+      tracked:
+        false,
+
       reason:
         "invalid_assistant_message",
     };
@@ -110,36 +165,75 @@ export async function trackKnowledgeGap(
     userMessage.id
   ) {
     return {
-      tracked: false,
-      reason: "reply_mismatch",
+      tracked:
+        false,
+
+      reason:
+        "reply_mismatch",
     };
   }
 
   /*
-   * فعلاً Gap فقط زمانی ایجاد می‌شود
-   * که پاسخ کافی نداشته باشیم.
-   *
-   * unclassified به تنهایی Gap نیست.
+   * Gap فقط برای پاسخ بدون Answer ساخته می‌شود.
    */
   if (
     assistantMessage.has_answer !==
     false
   ) {
     return {
-      tracked: false,
-      reason: "answer_available",
+      tracked:
+        false,
+
+      reason:
+        "answer_available",
+    };
+  }
+
+  /*
+   * =========================================
+   * Operational Grounding Blocks
+   *
+   * اگر پاسخ فقط به‌دلیل خرابی Verifier،
+   * Budget یا خروجی نامعتبر Block شده باشد،
+   * این مسئله Knowledge Gap نیست.
+   *
+   * چنین مواردی در Grounding Analytics قابل
+   * مشاهده‌اند ولی نباید صف اصلاح Knowledge
+   * را آلوده کنند.
+   * =========================================
+   */
+
+  if (
+    isOperationalKnowledgeGapGroundingBlock(
+      toGroundingMessage(
+        assistantMessage
+      )
+    )
+  ) {
+    return {
+      tracked:
+        false,
+
+      reason:
+        "grounding_operational_block",
     };
   }
 
   const questionText =
     String(
-      userMessage.content || ""
+      userMessage.content ||
+        ""
     ).trim();
 
-  if (!questionText) {
+  if (
+    !questionText
+  ) {
     return {
-      tracked: false,
-      reason: "empty_question",
+      tracked:
+        false,
+
+      reason:
+        "empty_question",
     };
   }
 
@@ -153,7 +247,9 @@ export async function trackKnowledgeGap(
     )
   ) {
     return {
-      tracked: false,
+      tracked:
+        false,
+
       reason:
         "trivial_conversation",
     };
@@ -164,9 +260,13 @@ export async function trackKnowledgeGap(
       questionText
     );
 
-  if (!normalizedKey) {
+  if (
+    !normalizedKey
+  ) {
     return {
-      tracked: false,
+      tracked:
+        false,
+
       reason:
         "invalid_normalized_key",
     };
@@ -185,20 +285,23 @@ export async function trackKnowledgeGap(
    * اگر هم جواب نداریم و هم Topic
    * تشخیص داده نشده، Gap از نوع both است.
    */
-  const gapType: GapType =
-    classificationStatus ===
-    "unclassified"
-      ? "both"
-      : "no_answer";
+  const gapType:
+    GapType =
+      classificationStatus ===
+      "unclassified"
+        ? "both"
+        : "no_answer";
 
   const topicId =
     String(
-      userMessage.topic || ""
+      userMessage.topic ||
+        ""
     );
 
   const userId =
     String(
-      userMessage.user || ""
+      userMessage.user ||
+        ""
     );
 
   const conversationId =
@@ -212,7 +315,9 @@ export async function trackKnowledgeGap(
     !conversationId
   ) {
     return {
-      tracked: false,
+      tracked:
+        false,
+
       reason:
         "missing_relations",
     };
@@ -221,13 +326,19 @@ export async function trackKnowledgeGap(
   /*
    * Department را از Account می‌گیریم.
    */
-  const account = await pb
-    .collection("accounts")
-    .getOne(userId);
+  const account =
+    await pb
+      .collection(
+        "accounts"
+      )
+      .getOne(
+        userId
+      );
 
   const departmentId =
     String(
-      account.department || ""
+      account.department ||
+        ""
     );
 
   /*
@@ -237,8 +348,11 @@ export async function trackKnowledgeGap(
   const gap =
     await findOrCreateGap({
       normalizedKey,
+
       questionText,
+
       topicId,
+
       gapType,
     });
 
@@ -266,42 +380,48 @@ export async function trackKnowledgeGap(
   /*
    * ایجاد Occurrence
    */
-  let occurrence: RecordModel;
+  let occurrence:
+    RecordModel;
 
   try {
-    occurrence = await pb
-      .collection(
-        "knowledge_gap_occurrences"
-      )
-      .create({
-        gap:
-          gap.id,
+    occurrence =
+      await pb
+        .collection(
+          "knowledge_gap_occurrences"
+        )
+        .create({
+          gap:
+            gap.id,
 
-        user_message:
-          userMessage.id,
+          user_message:
+            userMessage.id,
 
-        assistant_message:
-          assistantMessage.id,
+          assistant_message:
+            assistantMessage.id,
 
-        user:
-          userId,
+          user:
+            userId,
 
-        conversation:
-          conversationId,
+          conversation:
+            conversationId,
 
-        department:
-          departmentId || "",
+          department:
+            departmentId ||
+            "",
 
-        topic:
-          topicId || "",
+          topic:
+            topicId ||
+            "",
 
-        reason:
-          gapType,
+          reason:
+            gapType,
 
-        question_text:
-          questionText,
-      });
-  } catch (error) {
+          question_text:
+            questionText,
+        });
+  } catch (
+    error
+  ) {
     /*
      * Unique index روی user_message
      * ممکن است Request همزمان را Reject کند.
@@ -315,9 +435,13 @@ export async function trackKnowledgeGap(
           userMessage.id
         );
 
-      if (duplicate) {
+      if (
+        duplicate
+      ) {
         return {
-          tracked: false,
+          tracked:
+            false,
+
           reason:
             "already_tracked",
         };
@@ -330,20 +454,26 @@ export async function trackKnowledgeGap(
   /*
    * Counterها
    */
-  const updateData: Record<
-    string,
-    unknown
-  > = {
-    "occurrence_count+": 1,
+  const updateData:
+    Record<
+      string,
+      unknown
+    > = {
+    "occurrence_count+":
+      1,
 
     last_seen_at:
-      new Date().toISOString(),
+      new Date()
+        .toISOString(),
   };
 
-  if (!userAlreadySeen) {
+  if (
+    !userAlreadySeen
+  ) {
     updateData[
       "unique_users_count+"
-    ] = 1;
+    ] =
+      1;
   }
 
   if (
@@ -352,7 +482,8 @@ export async function trackKnowledgeGap(
   ) {
     updateData[
       "unique_departments_count+"
-    ] = 1;
+    ] =
+      1;
   }
 
   /*
@@ -361,9 +492,11 @@ export async function trackKnowledgeGap(
    * آن را مجدداً باز می‌کنیم.
    */
   if (
-    gap.status === "resolved"
+    gap.status ===
+    "resolved"
   ) {
-    updateData.status = "open";
+    updateData.status =
+      "open";
   }
 
   /*
@@ -403,10 +536,26 @@ export async function trackKnowledgeGap(
       );
 
   /*
+   * =========================================
+   * Grounding Risk
+   *
+   * Risk از Occurrenceهای همین Gap و Metadata
+   * پیام Assistant محاسبه می‌شود.
+   *
+   * نیاز به Field جدید در PocketBase ندارد.
+   * =========================================
+   */
+
+  const groundingRisk =
+    await calculateGroundingRiskSummary(
+      gap.id
+    );
+
+  /*
    * محاسبه Priority
    */
   const priorityScore =
-    calculatePriorityScore({
+    calculateKnowledgeGapPriority({
       occurrenceCount:
         Number(
           updatedGap.occurrence_count ||
@@ -424,20 +573,38 @@ export async function trackKnowledgeGap(
           updatedGap.unique_departments_count ||
             0
         ),
+
+      noEvidenceBlockedCount:
+        groundingRisk
+          .noEvidenceBlockedCount,
+
+      verifierBlockedCount:
+        groundingRisk
+          .verifierBlockedCount,
+
+      unsupportedClaimsCount:
+        groundingRisk
+          .unsupportedClaimsCount,
     });
 
   /*
    * ذخیره Priority
    */
   await pb
-    .collection("knowledge_gaps")
-    .update(gap.id, {
-      priority_score:
-        priorityScore,
-    });
+    .collection(
+      "knowledge_gaps"
+    )
+    .update(
+      gap.id,
+      {
+        priority_score:
+          priorityScore,
+      }
+    );
 
   return {
-    tracked: true,
+    tracked:
+      true,
 
     gapId:
       gap.id,
@@ -506,7 +673,8 @@ async function findOrCreateGap({
           normalizedKey,
 
         topic:
-          topicId || "",
+          topicId ||
+          "",
 
         status:
           "open",
@@ -527,9 +695,12 @@ async function findOrCreateGap({
           0,
 
         last_seen_at:
-          new Date().toISOString(),
+          new Date()
+            .toISOString(),
       });
-  } catch (error) {
+  } catch (
+    error
+  ) {
     /*
      * اگر دو Request همزمان سعی کردند
      * همان Gap را ایجاد کنند، Unique Index
@@ -565,7 +736,8 @@ async function findOrCreateGap({
  */
 
 async function findOccurrenceByUserMessage(
-  userMessageId: string
+  userMessageId:
+    string
 ): Promise<RecordModel | null> {
   const pb =
     await getAdminPocketBase();
@@ -596,8 +768,11 @@ async function findOccurrenceByUserMessage(
  */
 
 async function hasOccurrenceForUser(
-  gapId: string,
-  userId: string
+  gapId:
+    string,
+
+  userId:
+    string
 ): Promise<boolean> {
   const pb =
     await getAdminPocketBase();
@@ -633,8 +808,11 @@ async function hasOccurrenceForUser(
  */
 
 async function hasOccurrenceForDepartment(
-  gapId: string,
-  departmentId: string
+  gapId:
+    string,
+
+  departmentId:
+    string
 ): Promise<boolean> {
   const pb =
     await getAdminPocketBase();
@@ -665,26 +843,178 @@ async function hasOccurrenceForDepartment(
 
 /*
  * =========================================
+ * Grounding Risk
+ * =========================================
+ */
+
+async function calculateGroundingRiskSummary(
+  gapId:
+    string
+) {
+  const pb =
+    await getAdminPocketBase();
+
+  const result =
+    await pb
+      .collection(
+        "knowledge_gap_occurrences"
+      )
+      .getList(
+        1,
+        MAX_RISK_OCCURRENCES,
+        {
+          filter:
+            pb.filter(
+              "gap = {:gap}",
+              {
+                gap:
+                  gapId,
+              }
+            ),
+
+          sort:
+            "-created",
+
+          expand:
+            "assistant_message",
+        }
+      );
+
+  const messages:
+    KnowledgeGapGroundingMessage[] =
+      [];
+
+  for (
+    const occurrence of
+    result.items
+  ) {
+    const assistantMessage =
+      getExpandedRecord(
+        occurrence,
+        "assistant_message"
+      );
+
+    if (
+      assistantMessage
+    ) {
+      messages.push(
+        toGroundingMessage(
+          assistantMessage
+        )
+      );
+    }
+  }
+
+  return summarizeKnowledgeGapGroundingRisk(
+    messages
+  );
+}
+
+/*
+ * =========================================
+ * Expanded Record
+ * =========================================
+ */
+
+/*
+ * =========================================
+ * Grounding Message Adapter
+ *
+ * RecordModel فیلدهای Collection-specific را
+ * در Type پایه اعلام نمی‌کند. این Adapter فقط
+ * Metadata موردنیاز Priority را استخراج می‌کند
+ * و از Cast مستقیم RecordModel جلوگیری می‌کند.
+ * =========================================
+ */
+
+function toGroundingMessage(
+  record:
+    RecordModel
+): KnowledgeGapGroundingMessage {
+  return {
+    grounding_gate_reason:
+      record.grounding_gate_reason,
+
+    grounding_verifier_status:
+      record.grounding_verifier_status,
+
+    grounding_unsupported_claims:
+      record.grounding_unsupported_claims,
+  };
+}
+
+/*
+ * =========================================
+ * Expanded Record
+ * =========================================
+ */
+
+function getExpandedRecord(
+  record:
+    RecordModel,
+
+  key:
+    string
+): RecordModel | undefined {
+  const value =
+    record.expand?.[
+      key
+    ];
+
+  if (
+    !value
+  ) {
+    return undefined;
+  }
+
+  if (
+    Array.isArray(
+      value
+    )
+  ) {
+    return value[0] as
+      | RecordModel
+      | undefined;
+  }
+
+  return value as
+    RecordModel;
+}
+
+/*
+ * =========================================
  * Normalization
  * =========================================
  */
 
 export function normalizeGapKey(
-  value: string
+  value:
+    string
 ): string {
   return value
-    .normalize("NFKC")
+    .normalize(
+      "NFKC"
+    )
 
     /*
      * حروف عربی به فارسی
      */
-    .replace(/[يى]/g, "ی")
-    .replace(/ك/g, "ک")
+    .replace(
+      /[يى]/g,
+      "ی"
+    )
+    .replace(
+      /ك/g,
+      "ک"
+    )
 
     /*
      * نیم فاصله به Space
      */
-    .replace(/\u200c/g, " ")
+    .replace(
+      /\u200c/g,
+      " "
+    )
 
     /*
      * حذف حرکات عربی
@@ -707,14 +1037,20 @@ export function normalizeGapKey(
     /*
      * حذف Space اضافه
      */
-    .replace(/\s+/g, " ")
+    .replace(
+      /\s+/g,
+      " "
+    )
 
     .trim()
 
     /*
      * جلوگیری از Key بسیار بزرگ
      */
-    .slice(0, 500);
+    .slice(
+      0,
+      500
+    );
 }
 
 /*
@@ -724,13 +1060,18 @@ export function normalizeGapKey(
  */
 
 function isTrivialConversation(
-  value: string
+  value:
+    string
 ): boolean {
   const normalized =
-    normalizeGapKey(value);
+    normalizeGapKey(
+      value
+    );
 
   const trivialMessages =
-    new Set<string>([
+    new Set<
+      string
+    >([
       "سلام",
       "درود",
       "سلام خوبی",
@@ -758,14 +1099,19 @@ function isTrivialConversation(
  */
 
 function createGapTitle(
-  question: string
+  question:
+    string
 ): string {
   const cleaned =
     question
-      .replace(/\s+/g, " ")
+      .replace(
+        /\s+/g,
+        " "
+      )
       .trim();
 
-  const maxLength = 80;
+  const maxLength =
+    80;
 
   if (
     cleaned.length <=
@@ -776,8 +1122,12 @@ function createGapTitle(
 
   return (
     cleaned
-      .slice(0, maxLength)
-      .trim() + "..."
+      .slice(
+        0,
+        maxLength
+      )
+      .trim() +
+    "..."
   );
 }
 
@@ -788,12 +1138,16 @@ function createGapTitle(
  */
 
 function normalizeGapType(
-  value: unknown
+  value:
+    unknown
 ): GapType {
   if (
-    value === "unclassified" ||
-    value === "both" ||
-    value === "no_answer"
+    value ===
+      "unclassified" ||
+    value ===
+      "both" ||
+    value ===
+      "no_answer"
   ) {
     return value;
   }
@@ -802,18 +1156,24 @@ function normalizeGapType(
 }
 
 function mergeGapTypes(
-  current: GapType,
-  incoming: GapType
+  current:
+    GapType,
+
+  incoming:
+    GapType
 ): GapType {
   if (
-    current === incoming
+    current ===
+    incoming
   ) {
     return current;
   }
 
   if (
-    current === "both" ||
-    incoming === "both"
+    current ===
+      "both" ||
+    incoming ===
+      "both"
   ) {
     return "both";
   }
@@ -821,28 +1181,3 @@ function mergeGapTypes(
   return "both";
 }
 
-/*
- * =========================================
- * Priority Score
- * =========================================
- */
-
-function calculatePriorityScore({
-  occurrenceCount,
-  uniqueUsers,
-  uniqueDepartments,
-}: PriorityInput): number {
-  /*
-   * فرمول ساده و قابل توضیح:
-   *
-   * هر بار تکرار = 2 امتیاز
-   * هر کاربر جدید = 3 امتیاز
-   * هر Department جدید = 5 امتیاز
-   */
-
-  return (
-    occurrenceCount * 2 +
-    uniqueUsers * 3 +
-    uniqueDepartments * 5
-  );
-}

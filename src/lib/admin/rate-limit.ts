@@ -36,7 +36,14 @@ export type AdminRateLimitAction =
   | "knowledge.sync_batch"
   | "knowledge_gap.update"
   | "knowledge_gap.resolve"
-  | "knowledge.search";
+  | "knowledge.search"
+  | "topic.create"
+  | "topic.update"
+  | "topic.bulk_status"
+  | "topic.merge"
+  | "topic.classification_test"
+  | "topic.classification_review_update"
+  | "topic.guidance_validation";
 
 /*
  * ============================================
@@ -355,6 +362,100 @@ const ADMIN_RATE_LIMIT_POLICIES:
   "knowledge_gap.resolve": {
     maxRequests:
       10,
+
+    windowMilliseconds:
+      minutes(
+        1
+      ),
+  },
+
+  /*
+   * ==========================================
+   * Topics
+   * ==========================================
+   */
+
+  "topic.create": {
+    maxRequests:
+      10,
+
+    windowMilliseconds:
+      minutes(
+        1
+      ),
+  },
+
+  "topic.update": {
+    maxRequests:
+      30,
+
+    windowMilliseconds:
+      minutes(
+        1
+      ),
+  },
+
+  /*
+   * هر Bulk Request می‌تواند چند Topic را تغییر
+   * دهد، بنابراین Bucket جدا و محدودتر دارد.
+   */
+  "topic.bulk_status": {
+    maxRequests:
+      10,
+
+    windowMilliseconds:
+      minutes(
+        1
+      ),
+  },
+
+  /*
+   * Merge چند Collection را تغییر می‌دهد و
+   * ممکن است Knowledge Itemها را Pending کند.
+   * عمداً محدودتر از Update معمولی است.
+   */
+  "topic.merge": {
+    maxRequests:
+      5,
+
+    windowMilliseconds:
+      minutes(
+        1
+      ),
+  },
+
+  "topic.classification_test": {
+    maxRequests:
+      10,
+
+    windowMilliseconds:
+      minutes(
+        1
+      ),
+  },
+
+  /*
+   * اصلاح دستی Classification روی داده واقعی.
+   * این عملیات Audit می‌شود و باید Burst نداشته باشد.
+   */
+  "topic.classification_review_update": {
+    maxRequests:
+      30,
+
+    windowMilliseconds:
+      minutes(
+        1
+      ),
+  },
+
+  /*
+   * هر Guidance Validation ممکن است تا 8 درخواست
+   * Preview Classification روی OpenAI اجرا کند.
+   * بنابراین Rate Limit عمداً محافظه‌کارانه است.
+   */
+  "topic.guidance_validation": {
+    maxRequests:
+      2,
 
     windowMilliseconds:
       minutes(

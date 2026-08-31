@@ -9,6 +9,22 @@ export type FeedbackRangeKey =
   | "90d"
   | "all";
 
+export type FeedbackReviewFilterKey =
+  | "all"
+  | "new"
+  | "in_progress"
+  | "resolved"
+  | "ignored";
+
+export type FeedbackReasonKey =
+  | "incorrect"
+  | "incomplete"
+  | "outdated"
+  | "irrelevant"
+  | "unclear"
+  | "source_issue"
+  | "other";
+
 export type FeedbackBreakdownItem = {
   id: string;
   name: string;
@@ -19,6 +35,37 @@ export type FeedbackBreakdownItem = {
 
   satisfactionRate: number;
   negativeRate: number;
+};
+
+export type FeedbackReasonTopicItem = {
+  id: string;
+  name: string;
+  count: number;
+};
+
+export type FeedbackReasonBreakdownItem = {
+  key: FeedbackReasonKey;
+  label: string;
+
+  /*
+   * تعداد Feedbackهای منفی که این Reason
+   * را انتخاب کرده‌اند.
+   */
+  count: number;
+
+  /*
+   * درصد از کل Feedbackهای منفی.
+   *
+   * چون هر Feedback می‌تواند چند Reason داشته
+   * باشد، مجموع percentageها ممکن است بیش از
+   * 100 درصد شود.
+   */
+  percentage: number;
+
+  /*
+   * Topicهای پرتکرار برای همین Reason.
+   */
+  topics: FeedbackReasonTopicItem[];
 };
 
 export type RecentNegativeFeedback = {
@@ -43,7 +90,25 @@ export type RecentNegativeFeedback = {
     title: string;
   }>;
 
+  reasons: FeedbackReasonKey[];
+
   comment?: string;
+
+  reviewStatus:
+    | "new"
+    | "in_progress"
+    | "resolved"
+    | "ignored";
+
+  reviewNote?: string;
+
+  reviewedBy?: string;
+  reviewedAt?: string;
+
+  resolvedKnowledgeItem?: {
+    id: string;
+    title: string;
+  };
 
   created: string;
 };
@@ -53,6 +118,19 @@ export type FeedbackAnalytics = {
     key: FeedbackRangeKey;
     label: string;
     since?: string;
+  };
+
+  reviewFilter: {
+    key: FeedbackReviewFilterKey;
+    label: string;
+  };
+
+  reviewSummary: {
+    all: number;
+    new: number;
+    inProgress: number;
+    resolved: number;
+    ignored: number;
   };
 
   summary: {
@@ -65,6 +143,17 @@ export type FeedbackAnalytics = {
 
     comments: number;
 
+    /*
+     * تعداد Feedbackهای منفی که حداقل یک
+     * Structured Reason دارند.
+     */
+    negativeWithReasons: number;
+
+    /*
+     * درصد Feedbackهای منفی دارای Reason.
+     */
+    negativeReasonCoverageRate: number;
+
     satisfactionRate: number;
 
     coverageRate: number;
@@ -76,8 +165,48 @@ export type FeedbackAnalytics = {
 
   employees: FeedbackBreakdownItem[];
 
+  negativeReasons: FeedbackReasonBreakdownItem[];
+
   recentNegative: RecentNegativeFeedback[];
 };
+
+/*
+ * ============================================
+ * Feedback Reason Labels
+ * ============================================
+ */
+
+const FEEDBACK_REASON_LABELS: Record<
+  FeedbackReasonKey,
+  string
+> = {
+  incorrect:
+    "پاسخ اشتباه است",
+
+  incomplete:
+    "پاسخ ناقص است",
+
+  outdated:
+    "اطلاعات قدیمی است",
+
+  irrelevant:
+    "پاسخ نامرتبط است",
+
+  unclear:
+    "پاسخ مبهم است",
+
+  source_issue:
+    "مشکل در منبع یا اطلاعات",
+
+  other:
+    "مورد دیگر",
+};
+
+const MAX_FEEDBACK_REASONS =
+  3;
+
+const MAX_REASON_TOPICS =
+  5;
 
 /*
  * ============================================
@@ -86,7 +215,8 @@ export type FeedbackAnalytics = {
  */
 
 export async function getFeedbackAnalytics(
-  rangeKey: FeedbackRangeKey
+  rangeKey: FeedbackRangeKey,
+  reviewFilterKey: FeedbackReviewFilterKey = "all"
 ): Promise<FeedbackAnalytics> {
   const pb =
     await getAdminPocketBase();
@@ -94,6 +224,11 @@ export async function getFeedbackAnalytics(
   const range =
     resolveFeedbackRange(
       rangeKey
+    );
+
+  const reviewFilter =
+    resolveFeedbackReviewFilter(
+      reviewFilterKey
     );
 
   /*
@@ -161,6 +296,7 @@ export async function getFeedbackAnalytics(
             "message.reply_to",
             "message.reply_to.topic",
             "message.sources",
+            "resolved_knowledge_item",
           ].join(","),
         }),
 
@@ -196,6 +332,26 @@ export async function getFeedbackAnalytics(
   let comments =
     0;
 
+  let negativeWithReasons =
+    0;
+
+  const reviewSummary = {
+    all:
+      0,
+
+    new:
+      0,
+
+    inProgress:
+      0,
+
+    resolved:
+      0,
+
+    ignored:
+      0,
+  };
+
   const topicMap =
     new Map<
       string,
@@ -212,6 +368,12 @@ export async function getFeedbackAnalytics(
     new Map<
       string,
       MutableBreakdown
+    >();
+
+  const reasonMap =
+    new Map<
+      FeedbackReasonKey,
+      MutableReasonBreakdown
     >();
 
   const recentNegative:
@@ -249,6 +411,67 @@ export async function getFeedbackAnalytics(
     }
 
     /*
+     * Structured Negative Reasons
+     *
+     * Up Voteها عمداً Reason ندارند.
+     */
+    const reasons =
+      isPositive
+        ? []
+        : normalizeFeedbackReasons(
+            feedback.reasons
+          );
+
+    if (
+      !isPositive &&
+      reasons.length >
+        0
+    ) {
+      negativeWithReasons +=
+        1;
+    }
+
+    const reviewStatus =
+      isPositive
+        ? "new"
+        : normalizeReviewStatus(
+            feedback.review_status
+          );
+
+    if (
+      !isPositive
+    ) {
+      reviewSummary.all +=
+        1;
+
+      if (
+        reviewStatus ===
+        "new"
+      ) {
+        reviewSummary.new +=
+          1;
+      } else if (
+        reviewStatus ===
+        "in_progress"
+      ) {
+        reviewSummary.inProgress +=
+          1;
+      } else if (
+        reviewStatus ===
+        "resolved"
+      ) {
+        reviewSummary.resolved +=
+          1;
+      } else if (
+        reviewStatus ===
+        "ignored"
+      ) {
+        reviewSummary.ignored +=
+          1;
+      }
+    }
+
+    /*
      * Assistant Message
      */
     const message =
@@ -258,6 +481,11 @@ export async function getFeedbackAnalytics(
       );
 
     if (!message) {
+      /*
+       * Counters عمومی Feedback همچنان معتبرند،
+       * ولی Breakdownهای وابسته به Message بدون
+       * Expand قابل محاسبه نیستند.
+       */
       continue;
     }
 
@@ -340,6 +568,14 @@ export async function getFeedbackAnalytics(
           ""
       ).trim();
 
+    const normalizedTopicId =
+      topicId ||
+      "__without_topic__";
+
+    const normalizedTopicName =
+      topicName ||
+      "بدون موضوع";
+
     /*
      * Topic Breakdown
      *
@@ -349,10 +585,8 @@ export async function getFeedbackAnalytics(
      */
     addToBreakdown(
       topicMap,
-      topicId ||
-        "__without_topic__",
-      topicName ||
-        "بدون موضوع",
+      normalizedTopicId,
+      normalizedTopicName,
       isPositive
     );
 
@@ -431,10 +665,49 @@ export async function getFeedbackAnalytics(
     }
 
     /*
+     * ========================================
+     * Negative Reason Breakdown
+     *
+     * هر Reason برای همان Feedback فقط یک بار
+     * شمرده می‌شود.
+     * ========================================
+     */
+
+    if (
+      !isPositive &&
+      reasons.length >
+        0
+    ) {
+      for (
+        const reason of
+        reasons
+      ) {
+        addToReasonBreakdown(
+          reasonMap,
+          reason,
+          normalizedTopicId,
+          normalizedTopicName
+        );
+      }
+    }
+
+    const resolvedKnowledgeItem =
+      getExpandedOne(
+        feedback,
+        "resolved_knowledge_item"
+      );
+
+    /*
      * Recent Negative Feedback
      */
     if (
       !isPositive &&
+      (
+        reviewFilter.key ===
+          "all" ||
+        reviewStatus ===
+          reviewFilter.key
+      ) &&
       recentNegative.length <
         20
     ) {
@@ -485,9 +758,52 @@ export async function getFeedbackAnalytics(
         sources:
           normalizedSources,
 
+        reasons,
+
         comment:
           comment ||
           undefined,
+
+        reviewStatus,
+
+        reviewNote:
+          String(
+            feedback.review_note ||
+              ""
+          ).trim() ||
+          undefined,
+
+        reviewedBy:
+          String(
+            feedback.reviewed_by ||
+              ""
+          ).trim() ||
+          undefined,
+
+        reviewedAt:
+          String(
+            feedback.reviewed_at ||
+              ""
+          ).trim() ||
+          undefined,
+
+        resolvedKnowledgeItem:
+          resolvedKnowledgeItem
+            ? {
+                id:
+                  String(
+                    resolvedKnowledgeItem.id ||
+                      ""
+                  ),
+
+                title:
+                  String(
+                    resolvedKnowledgeItem.title ||
+                      ""
+                  ).trim() ||
+                  "مطلب اصلاحی",
+              }
+            : undefined,
 
         created:
           String(
@@ -524,6 +840,15 @@ export async function getFeedbackAnalytics(
         )
       : 0;
 
+  const negativeReasonCoverageRate =
+    negative >
+    0
+      ? percentage(
+          negativeWithReasons,
+          negative
+        )
+      : 0;
+
   /*
    * ==========================================
    * Response
@@ -544,6 +869,16 @@ export async function getFeedbackAnalytics(
           : undefined,
     },
 
+    reviewFilter: {
+      key:
+        reviewFilter.key,
+
+      label:
+        reviewFilter.label,
+    },
+
+    reviewSummary,
+
     summary: {
       assistantMessages:
         assistantMessages.totalItems,
@@ -555,6 +890,10 @@ export async function getFeedbackAnalytics(
       negative,
 
       comments,
+
+      negativeWithReasons,
+
+      negativeReasonCoverageRate,
 
       satisfactionRate,
 
@@ -585,6 +924,12 @@ export async function getFeedbackAnalytics(
         12
       ),
 
+    negativeReasons:
+      finalizeReasonBreakdown(
+        reasonMap,
+        negative
+      ),
+
     recentNegative,
   };
 }
@@ -594,6 +939,74 @@ export async function getFeedbackAnalytics(
  * Range
  * ============================================
  */
+
+export function normalizeFeedbackReviewFilter(
+  value:
+    | string
+    | undefined
+): FeedbackReviewFilterKey {
+  if (
+    value ===
+      "new" ||
+    value ===
+      "in_progress" ||
+    value ===
+      "resolved" ||
+    value ===
+      "ignored" ||
+    value ===
+      "all"
+  ) {
+    return value;
+  }
+
+  return "all";
+}
+
+function resolveFeedbackReviewFilter(
+  key:
+    FeedbackReviewFilterKey
+) {
+  switch (
+    key
+  ) {
+    case "new":
+      return {
+        key,
+        label:
+          "جدید",
+      };
+
+    case "in_progress":
+      return {
+        key,
+        label:
+          "در حال بررسی",
+      };
+
+    case "resolved":
+      return {
+        key,
+        label:
+          "رفع‌شده",
+      };
+
+    case "ignored":
+      return {
+        key,
+        label:
+          "نادیده گرفته‌شده",
+      };
+
+    default:
+      return {
+        key:
+          "all" as const,
+        label:
+          "همه",
+      };
+  }
+}
 
 export function normalizeFeedbackRange(
   value:
@@ -707,7 +1120,7 @@ function resolveFeedbackRange(
 
 /*
  * ============================================
- * Breakdown
+ * General Breakdown
  * ============================================
  */
 
@@ -819,6 +1232,311 @@ function finalizeBreakdown(
         );
       }
     );
+}
+
+/*
+ * ============================================
+ * Negative Reason Breakdown
+ * ============================================
+ */
+
+type MutableReasonTopic = {
+  id: string;
+  name: string;
+  count: number;
+};
+
+type MutableReasonBreakdown = {
+  key: FeedbackReasonKey;
+  count: number;
+
+  topics: Map<
+    string,
+    MutableReasonTopic
+  >;
+};
+
+function addToReasonBreakdown(
+  map: Map<
+    FeedbackReasonKey,
+    MutableReasonBreakdown
+  >,
+
+  reason:
+    FeedbackReasonKey,
+
+  topicId:
+    string,
+
+  topicName:
+    string
+) {
+  let item =
+    map.get(
+      reason
+    );
+
+  if (!item) {
+    item = {
+      key:
+        reason,
+
+      count:
+        0,
+
+      topics:
+        new Map(),
+    };
+
+    map.set(
+      reason,
+      item
+    );
+  }
+
+  item.count +=
+    1;
+
+  const existingTopic =
+    item.topics.get(
+      topicId
+    );
+
+  if (
+    existingTopic
+  ) {
+    existingTopic.count +=
+      1;
+
+    return;
+  }
+
+  item.topics.set(
+    topicId,
+    {
+      id:
+        topicId,
+
+      name:
+        topicName,
+
+      count:
+        1,
+    }
+  );
+}
+
+function finalizeReasonBreakdown(
+  map: Map<
+    FeedbackReasonKey,
+    MutableReasonBreakdown
+  >,
+
+  totalNegative:
+    number
+): FeedbackReasonBreakdownItem[] {
+  /*
+   * تمام Reasonها حتی اگر Count صفر داشته باشند
+   * در خروجی وجود دارند تا UI ثابت و قابل پیش‌بینی
+   * باشد.
+   */
+  const keys =
+    Object.keys(
+      FEEDBACK_REASON_LABELS
+    ) as FeedbackReasonKey[];
+
+  return keys
+    .map(
+      (
+        key
+      ) => {
+        const item =
+          map.get(
+            key
+          );
+
+        const count =
+          item?.count ||
+          0;
+
+        const topics =
+          item
+            ? [
+                ...item.topics.values(),
+              ]
+                .sort(
+                  (
+                    first,
+                    second
+                  ) => {
+                    if (
+                      second.count !==
+                      first.count
+                    ) {
+                      return (
+                        second.count -
+                        first.count
+                      );
+                    }
+
+                    return first.name.localeCompare(
+                      second.name,
+                      "fa"
+                    );
+                  }
+                )
+                .slice(
+                  0,
+                  MAX_REASON_TOPICS
+                )
+            : [];
+
+        return {
+          key,
+
+          label:
+            FEEDBACK_REASON_LABELS[
+              key
+            ],
+
+          count,
+
+          percentage:
+            totalNegative >
+            0
+              ? percentage(
+                  count,
+                  totalNegative
+                )
+              : 0,
+
+          topics,
+        };
+      }
+    )
+    .sort(
+      (
+        first,
+        second
+      ) => {
+        if (
+          second.count !==
+          first.count
+        ) {
+          return (
+            second.count -
+            first.count
+          );
+        }
+
+        return first.label.localeCompare(
+          second.label,
+          "fa"
+        );
+      }
+    );
+}
+
+/*
+ * ============================================
+ * Feedback Reasons
+ * ============================================
+ */
+
+function normalizeFeedbackReasons(
+  value:
+    unknown
+): FeedbackReasonKey[] {
+  if (
+    !Array.isArray(
+      value
+    )
+  ) {
+    return [];
+  }
+
+  const result:
+    FeedbackReasonKey[] =
+      [];
+
+  for (
+    const item of
+    value
+  ) {
+    if (
+      !isFeedbackReason(
+        item
+      ) ||
+      result.includes(
+        item
+      )
+    ) {
+      continue;
+    }
+
+    result.push(
+      item
+    );
+
+    if (
+      result.length >=
+      MAX_FEEDBACK_REASONS
+    ) {
+      break;
+    }
+  }
+
+  return result;
+}
+
+function isFeedbackReason(
+  value:
+    unknown
+): value is FeedbackReasonKey {
+  return (
+    value ===
+      "incorrect" ||
+    value ===
+      "incomplete" ||
+    value ===
+      "outdated" ||
+    value ===
+      "irrelevant" ||
+    value ===
+      "unclear" ||
+    value ===
+      "source_issue" ||
+    value ===
+      "other"
+  );
+}
+
+/*
+ * ============================================
+ * Review Status
+ * ============================================
+ */
+
+function normalizeReviewStatus(
+  value:
+    unknown
+):
+  | "new"
+  | "in_progress"
+  | "resolved"
+  | "ignored" {
+  if (
+    value ===
+      "in_progress" ||
+    value ===
+      "resolved" ||
+    value ===
+      "ignored"
+  ) {
+    return value;
+  }
+
+  return "new";
 }
 
 /*

@@ -2,6 +2,8 @@ import {
   NextResponse,
 } from "next/server";
 
+import type PocketBase from "pocketbase";
+
 import type {
   RecordModel,
 } from "pocketbase";
@@ -14,30 +16,86 @@ import {
   getPocketBaseServiceClient,
 } from "@/lib/pocketbase/service";
 
-import type {
-  ChatFeedback,
-} from "@/types/chat";
+/*
+ * ============================================
+ * Constants
+ * ============================================
+ */
 
 const RECORD_ID_PATTERN =
   /^[a-zA-Z0-9_-]{1,64}$/;
+
+const MAX_FEEDBACK_REASONS =
+  3;
+
+/*
+ * ============================================
+ * Feedback Reasons
+ * ============================================
+ */
+
+type FeedbackReason =
+  | "incorrect"
+  | "incomplete"
+  | "outdated"
+  | "irrelevant"
+  | "unclear"
+  | "source_issue"
+  | "other";
+
+const FEEDBACK_REASONS =
+  new Set<FeedbackReason>([
+    "incorrect",
+    "incomplete",
+    "outdated",
+    "irrelevant",
+    "unclear",
+    "source_issue",
+    "other",
+  ]);
+
+type FeedbackPayload = {
+  id:
+    string;
+
+  rating:
+    | "up"
+    | "down";
+
+  reasons?:
+    FeedbackReason[];
+
+  comment?:
+    string;
+
+  created:
+    string;
+
+  updated:
+    string;
+};
 
 /*
  * ============================================
  * GET
  *
- * Get feedbacks for assistant messages
- * in one conversation.
+ * دریافت تمام Feedbackهای کاربر
+ * برای Assistant Messageهای یک Conversation
  * ============================================
  */
 
 export async function GET(
-  _request: Request,
+  _request:
+    Request,
+
   {
     params,
   }: {
-    params: Promise<{
-      conversationId: string;
-    }>;
+    params:
+      Promise<{
+        conversationId:
+          string;
+      }>;
   }
 ) {
   const requestId =
@@ -45,16 +103,43 @@ export async function GET(
 
   /*
    * ==========================================
+   * Conversation ID
+   * ==========================================
+   */
+
+  const {
+    conversationId:
+      rawConversationId,
+  } = await params;
+
+  const conversationId =
+    cleanRecordId(
+      rawConversationId
+    );
+
+  if (
+    !conversationId
+  ) {
+    return apiError(
+      requestId,
+      400,
+      "INVALID_CONVERSATION_ID",
+      "شناسه گفتگو معتبر نیست."
+    );
+  }
+
+  /*
+   * ==========================================
    * Authentication
-   *
-   * فقط برای تشخیص هویت کاربر.
    * ==========================================
    */
 
   const session =
     await getAuthenticatedPocketBase();
 
-  if (!session) {
+  if (
+    !session
+  ) {
     return apiError(
       requestId,
       401,
@@ -67,37 +152,21 @@ export async function GET(
     account,
   } = session;
 
-  const {
-    conversationId,
-  } = await params;
-
-  if (
-  !RECORD_ID_PATTERN.test(
-    conversationId
-  )
-) {
-  return apiError(
-    requestId,
-    400,
-    "INVALID_CONVERSATION_ID",
-    "شناسه گفتگو معتبر نیست."
-  );
-}
-
   /*
    * ==========================================
    * Service Client
    * ==========================================
    */
 
-  let pb;
+  let pb:
+    PocketBase;
 
   try {
     pb =
       await getPocketBaseServiceClient();
   } catch (error) {
     console.error(
-      "Feedback service unavailable",
+      "Conversation feedback service unavailable",
       {
         requestId,
 
@@ -125,50 +194,31 @@ export async function GET(
    * ==========================================
    * Conversation Ownership
    *
-   * چون Service Client Ruleها را bypass
-   * می‌کند، مالکیت را صریح بررسی می‌کنیم.
+   * Service Client Ruleها را bypass می‌کند،
+   * بنابراین Ownership صریحاً بررسی می‌شود.
    * ==========================================
    */
 
   try {
-    const conversation =
-      await pb
-        .collection(
-          "conversations"
-        )
-        .getFirstListItem(
-          pb.filter(
-            "id = {:conversationId} && user = {:userId}",
-            {
-              conversationId,
-
-              userId:
-                account.id,
-            }
-          ),
+    await pb
+      .collection(
+        "conversations"
+      )
+      .getFirstListItem(
+        pb.filter(
+          "id = {:conversationId} && user = {:userId}",
           {
-            fields:
-              "id,user",
-          }
-        );
+            conversationId,
 
-    /*
-     * Defense in depth
-     */
-    if (
-      String(
-        conversation.user ||
-          ""
-      ) !==
-      account.id
-    ) {
-      return apiError(
-        requestId,
-        404,
-        "CONVERSATION_NOT_FOUND",
-        "گفتگو پیدا نشد."
+            userId:
+              account.id,
+          }
+        ),
+        {
+          fields:
+            "id,user",
+        }
       );
-    }
   } catch (error) {
     const status =
       getErrorStatus(
@@ -188,7 +238,7 @@ export async function GET(
     }
 
     console.error(
-      "Feedback conversation ownership failed",
+      "Conversation feedback ownership check failed",
       {
         requestId,
 
@@ -207,22 +257,18 @@ export async function GET(
     return apiError(
       requestId,
       503,
-      "FEEDBACK_CONVERSATION_CHECK_FAILED",
-      "در بررسی گفتگو خطایی رخ داد."
+      "CONVERSATION_CHECK_FAILED",
+      "بررسی گفتگو موقتاً امکان‌پذیر نیست."
     );
   }
 
   /*
    * ==========================================
-   * Feedbacks
+   * Feedback List
    *
-   * سه شرط مالکیت:
-   *
-   * feedback.user = current account
-   * message.user = current account
-   * message.conversation = current conversation
-   *
-   * و فقط Messageهای Assistant.
+   * علاوه بر feedback.user،
+   * Ownership خود Message و Conversation نیز
+   * داخل Filter بررسی می‌شود.
    * ==========================================
    */
 
@@ -238,15 +284,23 @@ export async function GET(
         .getFullList({
           filter:
             pb.filter(
-              "user = {:userId} && message.user = {:userId} && message.conversation = {:conversationId} && message.role = {:assistantRole}",
+              [
+                "user = {:userId}",
+                "message.user = {:userId}",
+                "message.role = {:role}",
+                "message.conversation = {:conversationId}",
+                "message.conversation.user = {:userId}",
+              ].join(
+                " && "
+              ),
               {
                 userId:
                   account.id,
 
-                conversationId,
-
-                assistantRole:
+                role:
                   "assistant",
+
+                conversationId,
               }
             ),
 
@@ -254,11 +308,21 @@ export async function GET(
             "created",
 
           fields:
-            "id,message,rating,comment,created,updated",
+            [
+              "id",
+              "message",
+              "rating",
+              "reasons",
+              "comment",
+              "created",
+              "updated",
+            ].join(
+              ","
+            ),
         });
   } catch (error) {
     console.error(
-      "Load conversation feedback failed",
+      "Conversation feedback load failed",
       {
         requestId,
 
@@ -278,7 +342,7 @@ export async function GET(
       requestId,
       503,
       "FEEDBACK_LOAD_FAILED",
-      "دریافت بازخوردها انجام نشد."
+      "دریافت بازخوردهای گفتگو انجام نشد."
     );
   }
 
@@ -288,55 +352,68 @@ export async function GET(
    * ==========================================
    */
 
-  return NextResponse.json(
+  return apiSuccess(
+    requestId,
     {
-      success:
-        true,
-
       items:
-        records.map(
-          (
-            record
-          ) => ({
-            messageId:
-              String(
-                record.message ||
-                  ""
-              ),
+        records
+          .map(
+            (
+              record
+            ) => {
+              const messageId =
+                cleanRecordId(
+                  record.message
+                );
 
-            feedback:
-              toFeedback(
-                record
-              ),
-          })
-        ),
+              if (
+                !messageId
+              ) {
+                return null;
+              }
 
-      requestId,
-    },
-    {
-      status:
-        200,
+              return {
+                messageId,
 
-      headers: {
-        "Cache-Control":
-          "no-store",
+                feedback:
+                  toFeedback(
+                    record
+                  ),
+              };
+            }
+          )
+          .filter(
+            (
+              item
+            ): item is {
+              messageId:
+                string;
 
-        "X-Request-Id":
-          requestId,
-      },
+              feedback:
+                FeedbackPayload;
+            } =>
+              item !==
+              null
+          ),
     }
   );
 }
 
 /*
  * ============================================
- * Serialize Feedback
+ * Feedback Mapping
  * ============================================
  */
 
 function toFeedback(
-  record: RecordModel
-): ChatFeedback {
+  record:
+    RecordModel
+): FeedbackPayload {
+  const reasons =
+    normalizeFeedbackReasons(
+      record.reasons
+    );
+
   return {
     id:
       record.id,
@@ -346,6 +423,13 @@ function toFeedback(
       "down"
         ? "down"
         : "up",
+
+    ...(reasons.length >
+    0
+      ? {
+          reasons,
+        }
+      : {}),
 
     ...(record.comment
       ? {
@@ -368,6 +452,147 @@ function toFeedback(
           ""
       ),
   };
+}
+
+/*
+ * ============================================
+ * Feedback Reasons
+ * ============================================
+ */
+
+function normalizeFeedbackReasons(
+  value:
+    unknown
+): FeedbackReason[] {
+  if (
+    !Array.isArray(
+      value
+    )
+  ) {
+    return [];
+  }
+
+  const result:
+    FeedbackReason[] =
+    [];
+
+  for (
+    const item of
+    value
+  ) {
+    if (
+      typeof item !==
+      "string"
+    ) {
+      continue;
+    }
+
+    const reason =
+      item.trim();
+
+    if (
+      !isFeedbackReason(
+        reason
+      ) ||
+      result.includes(
+        reason
+      )
+    ) {
+      continue;
+    }
+
+    result.push(
+      reason
+    );
+
+    if (
+      result.length >=
+      MAX_FEEDBACK_REASONS
+    ) {
+      break;
+    }
+  }
+
+  return result;
+}
+
+function isFeedbackReason(
+  value:
+    string
+): value is FeedbackReason {
+  return FEEDBACK_REASONS.has(
+    value as FeedbackReason
+  );
+}
+
+/*
+ * ============================================
+ * Record ID
+ * ============================================
+ */
+
+function cleanRecordId(
+  value:
+    unknown
+) {
+  if (
+    typeof value !==
+      "string"
+  ) {
+    return "";
+  }
+
+  const id =
+    value.trim();
+
+  return RECORD_ID_PATTERN.test(
+    id
+  )
+    ? id
+    : "";
+}
+
+/*
+ * ============================================
+ * Success Response
+ * ============================================
+ */
+
+function apiSuccess(
+  requestId:
+    string,
+
+  data:
+    Record<
+      string,
+      unknown
+    >
+) {
+  return NextResponse.json(
+    {
+      success:
+        true,
+
+      ...data,
+
+      requestId,
+    },
+    {
+      status:
+        200,
+
+      headers: {
+        "X-Request-Id":
+          requestId,
+
+        "Cache-Control":
+          "no-store",
+
+        "Pragma":
+          "no-cache",
+      },
+    }
+  );
 }
 
 /*
@@ -404,11 +629,14 @@ function apiError(
       status,
 
       headers: {
+        "X-Request-Id":
+          requestId,
+
         "Cache-Control":
           "no-store",
 
-        "X-Request-Id":
-          requestId,
+        "Pragma":
+          "no-cache",
       },
     }
   );
@@ -435,7 +663,8 @@ function getErrorStatus(
 
   const value =
     error as {
-      status?: unknown;
+      status?:
+        unknown;
     };
 
   return typeof value.status ===
@@ -468,11 +697,14 @@ function safeErrorMetadata(
 
   const value =
     error as {
-      name?: unknown;
+      name?:
+        unknown;
 
-      status?: unknown;
+      status?:
+        unknown;
 
-      code?: unknown;
+      code?:
+        unknown;
     };
 
   return {

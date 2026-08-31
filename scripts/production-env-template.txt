@@ -1,0 +1,37 @@
+# ==========================================================
+# FINAL PRODUCTION QA - Recommended values
+#
+# این فایل Secret واقعی نیست.
+# مقادیر Secret را داخل Repository Commit نکنید.
+# ==========================================================
+
+NODE_ENV=production
+
+# Timezone used by project rate-limit / analytics logic.
+APP_TIMEZONE=Asia/Tehran
+
+# Production auth safety.
+# Use a long random secret in hosting environment.
+AUTH_RATE_LIMIT_PEPPER=REPLACE_IN_HOSTING_SECRET_STORE
+
+# AI Eval execution.
+AI_AUTO_EVAL_ENABLED=true
+AI_MANUAL_EVAL_ENABLED=true
+
+# Distributed Eval locks.
+AI_AUTO_EVAL_LOCK_TTL_SECONDS=1800
+AI_EVAL_FULL_SUITE_LOCK_TTL_SECONDS=3600
+AI_EVAL_SINGLE_LOCK_TTL_SECONDS=900
+AI_EVAL_MAX_BATCH_CASES=50
+
+# Release Coverage Gate.
+AI_EVAL_COVERAGE_GATE_MODE=strict
+AI_EVAL_MIN_TOPIC_COVERAGE_PERCENT=100
+AI_EVAL_MIN_KNOWLEDGE_COVERAGE_PERCENT=80
+AI_EVAL_MIN_DIRECT_KNOWLEDGE_COVERAGE_PERCENT=50
+
+# Optional: tell production-readiness.mjs which project-specific
+# env names MUST exist. Fill with the exact names used in your
+# src/lib/ai/openai.ts and src/lib/pocketbase/service.ts.
+#
+# READINESS_REQUIRED_ENVS=OPENAI_API_KEY,OPENAI_VECTOR_STORE_ID,POCKETBASE_URL,...

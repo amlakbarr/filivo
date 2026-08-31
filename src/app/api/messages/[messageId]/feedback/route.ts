@@ -9,10 +9,6 @@ import type {
 } from "pocketbase";
 
 import {
-  consumeFeedbackRateLimit,
-} from "@/lib/feedback/rate-limit";
-
-import {
   getAuthenticatedPocketBase,
 } from "@/lib/pocketbase/auth";
 
@@ -34,6 +30,9 @@ import type {
 const MAX_COMMENT_LENGTH =
   1000;
 
+const MAX_FEEDBACK_REASONS =
+  3;
+
 const MAX_REQUEST_BODY_BYTES =
   8 * 1024;
 
@@ -42,12 +41,42 @@ const RECORD_ID_PATTERN =
 
 /*
  * ============================================
+ * Feedback Reasons
+ * ============================================
+ */
+
+type FeedbackReason =
+  | "incorrect"
+  | "incomplete"
+  | "outdated"
+  | "irrelevant"
+  | "unclear"
+  | "source_issue"
+  | "other";
+
+type FeedbackPayload =
+  ChatFeedback & {
+    reasons?:
+      FeedbackReason[];
+  };
+
+const FEEDBACK_REASONS =
+  new Set<FeedbackReason>([
+    "incorrect",
+    "incomplete",
+    "outdated",
+    "irrelevant",
+    "unclear",
+    "source_issue",
+    "other",
+  ]);
+
+/*
+ * ============================================
  * GET
  *
  * دریافت Feedback فعلی کاربر
- *
- * Read-only:
- * Mutation Rate Limit روی GET اعمال نمی‌شود.
+ * برای یک Assistant Message
  * ============================================
  */
 
@@ -63,6 +92,12 @@ export async function GET(
 ) {
   const requestId =
     crypto.randomUUID();
+
+  /*
+   * ==========================================
+   * Message ID
+   * ==========================================
+   */
 
   const {
     messageId,
@@ -81,12 +116,16 @@ export async function GET(
     );
   }
 
+  /*
+   * ==========================================
+   * Authentication
+   * ==========================================
+   */
+
   const session =
     await getAuthenticatedPocketBase();
 
-  if (
-    !session
-  ) {
+  if (!session) {
     return apiError(
       requestId,
       401,
@@ -98,6 +137,12 @@ export async function GET(
   const {
     account,
   } = session;
+
+  /*
+   * ==========================================
+   * Service Client
+   * ==========================================
+   */
 
   let pb:
     PocketBase;
@@ -130,6 +175,12 @@ export async function GET(
       "سرویس بازخورد موقتاً در دسترس نیست."
     );
   }
+
+  /*
+   * ==========================================
+   * Assistant Message Ownership
+   * ==========================================
+   */
 
   let message:
     RecordModel |
@@ -171,9 +222,7 @@ export async function GET(
     );
   }
 
-  if (
-    !message
-  ) {
+  if (!message) {
     return apiError(
       requestId,
       404,
@@ -181,6 +230,12 @@ export async function GET(
       "پیام موردنظر پیدا نشد."
     );
   }
+
+  /*
+   * ==========================================
+   * Feedback
+   * ==========================================
+   */
 
   let feedback:
     RecordModel |
@@ -242,11 +297,6 @@ export async function GET(
  * PUT
  *
  * Create / Update Feedback
- *
- * Rate Limit:
- *
- * message.feedback
- * 30 operations / 10 minutes / user
  * ============================================
  */
 
@@ -262,6 +312,12 @@ export async function PUT(
 ) {
   const requestId =
     crypto.randomUUID();
+
+  /*
+   * ==========================================
+   * Message ID
+   * ==========================================
+   */
 
   const {
     messageId,
@@ -280,12 +336,16 @@ export async function PUT(
     );
   }
 
+  /*
+   * ==========================================
+   * Authentication
+   * ==========================================
+   */
+
   const session =
     await getAuthenticatedPocketBase();
 
-  if (
-    !session
-  ) {
+  if (!session) {
     return apiError(
       requestId,
       401,
@@ -297,41 +357,6 @@ export async function PUT(
   const {
     account,
   } = session;
-
-  /*
-   * ==========================================
-   * Shared PUT + DELETE Rate Limit
-   * ==========================================
-   */
-
-  const rateLimitResult =
-    await consumeMessageFeedbackRateLimit({
-      requestId,
-
-      userId:
-        account.id,
-
-      messageId,
-    });
-
-  if (
-    !rateLimitResult.ok
-  ) {
-    return rateLimitResult.response;
-  }
-
-  const rateLimit =
-    rateLimitResult.rateLimit;
-
-  const respond =
-    <TResponse extends Response>(
-      response:
-        TResponse
-    ) =>
-      withRateLimitHeaders(
-        response,
-        rateLimit
-      );
 
   /*
    * ==========================================
@@ -356,13 +381,11 @@ export async function PUT(
     contentType !==
     "application/json"
   ) {
-    return respond(
-      apiError(
-        requestId,
-        415,
-        "UNSUPPORTED_MEDIA_TYPE",
-        "نوع محتوای درخواست معتبر نیست."
-      )
+    return apiError(
+      requestId,
+      415,
+      "UNSUPPORTED_MEDIA_TYPE",
+      "نوع محتوای درخواست معتبر نیست."
     );
   }
 
@@ -386,36 +409,26 @@ export async function PUT(
       );
 
     if (
-      !Number.isSafeInteger(
+      Number.isFinite(
         declaredLength
-      ) ||
-      declaredLength <
-        0
-    ) {
-      return respond(
-        apiError(
-          requestId,
-          400,
-          "INVALID_CONTENT_LENGTH",
-          "حجم درخواست معتبر نیست."
-        )
-      );
-    }
-
-    if (
+      ) &&
       declaredLength >
-      MAX_REQUEST_BODY_BYTES
+        MAX_REQUEST_BODY_BYTES
     ) {
-      return respond(
-        apiError(
-          requestId,
-          413,
-          "REQUEST_BODY_TOO_LARGE",
-          "حجم درخواست بیش از حد مجاز است."
-        )
+      return apiError(
+        requestId,
+        413,
+        "REQUEST_BODY_TOO_LARGE",
+        "حجم درخواست بیش از حد مجاز است."
       );
     }
   }
+
+  /*
+   * ==========================================
+   * Bounded JSON Body
+   * ==========================================
+   */
 
   const parsedBody =
     await readJsonBodyWithLimit(
@@ -426,36 +439,42 @@ export async function PUT(
   if (
     !parsedBody.ok
   ) {
-    return respond(
-      apiError(
-        requestId,
-        parsedBody.status,
-        parsedBody.code,
-        parsedBody.message
-      )
+    return apiError(
+      requestId,
+      parsedBody.status,
+      parsedBody.code,
+      parsedBody.message
     );
   }
 
   const body =
     parsedBody.body;
 
+  /*
+   * ==========================================
+   * Rating
+   * ==========================================
+   */
+
   const rating =
     getRating(
       body
     );
 
-  if (
-    !rating
-  ) {
-    return respond(
-      apiError(
-        requestId,
-        400,
-        "INVALID_FEEDBACK_RATING",
-        "امتیاز انتخاب‌شده معتبر نیست."
-      )
+  if (!rating) {
+    return apiError(
+      requestId,
+      400,
+      "INVALID_FEEDBACK_RATING",
+      "امتیاز انتخاب‌شده معتبر نیست."
     );
   }
+
+  /*
+   * ==========================================
+   * Comment
+   * ==========================================
+   */
 
   const commentResult =
     getComment(
@@ -465,21 +484,57 @@ export async function PUT(
   if (
     !commentResult.ok
   ) {
-    return respond(
-      apiError(
-        requestId,
-        400,
-        commentResult.code,
-        commentResult.message
-      )
+    return apiError(
+      requestId,
+      400,
+      commentResult.code,
+      commentResult.message
     );
   }
+
+  /*
+   * ==========================================
+   * Structured Reasons
+   *
+   * reasons اختیاری است تا Clientهای قدیمی
+   * همچنان سازگار بمانند.
+   *
+   * اگر در Update ارسال نشود، برای Down Vote
+   * مقدار قبلی حفظ می‌شود.
+   * ==========================================
+   */
+
+  const reasonsResult =
+    getReasons(
+      body
+    );
+
+  if (
+    !reasonsResult.ok
+  ) {
+    return apiError(
+      requestId,
+      400,
+      reasonsResult.code,
+      reasonsResult.message
+    );
+  }
+
+  /*
+   * Up Vote هیچ Comment/Reason منفی ندارد.
+   */
 
   const comment =
     rating ===
     "down"
       ? commentResult.comment
       : "";
+
+  /*
+   * ==========================================
+   * Service Client
+   * ==========================================
+   */
 
   let pb:
     PocketBase;
@@ -505,15 +560,19 @@ export async function PUT(
       }
     );
 
-    return respond(
-      apiError(
-        requestId,
-        503,
-        "FEEDBACK_SERVICE_UNAVAILABLE",
-        "سرویس بازخورد موقتاً در دسترس نیست."
-      )
+    return apiError(
+      requestId,
+      503,
+      "FEEDBACK_SERVICE_UNAVAILABLE",
+      "سرویس بازخورد موقتاً در دسترس نیست."
     );
   }
+
+  /*
+   * ==========================================
+   * Ownership
+   * ==========================================
+   */
 
   let message:
     RecordModel |
@@ -547,28 +606,28 @@ export async function PUT(
       }
     );
 
-    return respond(
-      apiError(
-        requestId,
-        503,
-        "FEEDBACK_MESSAGE_CHECK_FAILED",
-        "بررسی پیام موقتاً امکان‌پذیر نیست."
-      )
+    return apiError(
+      requestId,
+      503,
+      "FEEDBACK_MESSAGE_CHECK_FAILED",
+      "بررسی پیام موقتاً امکان‌پذیر نیست."
     );
   }
 
-  if (
-    !message
-  ) {
-    return respond(
-      apiError(
-        requestId,
-        404,
-        "MESSAGE_NOT_FOUND",
-        "پیام موردنظر پیدا نشد."
-      )
+  if (!message) {
+    return apiError(
+      requestId,
+      404,
+      "MESSAGE_NOT_FOUND",
+      "پیام موردنظر پیدا نشد."
     );
   }
+
+  /*
+   * ==========================================
+   * Existing Feedback
+   * ==========================================
+   */
 
   let feedback:
     RecordModel |
@@ -604,15 +663,35 @@ export async function PUT(
       }
     );
 
-    return respond(
-      apiError(
-        requestId,
-        503,
-        "FEEDBACK_LOOKUP_FAILED",
-        "بررسی بازخورد فعلی انجام نشد."
-      )
+    return apiError(
+      requestId,
+      503,
+      "FEEDBACK_LOOKUP_FAILED",
+      "بررسی بازخورد فعلی انجام نشد."
     );
   }
+
+  /*
+   * ==========================================
+   * Resolve Reasons
+   *
+   * - Up: همیشه پاک شود.
+   * - Down + reasons provided: مقدار جدید.
+   * - Down + reasons omitted: مقدار قبلی حفظ شود.
+   * ==========================================
+   */
+
+  const reasons =
+    rating ===
+    "up"
+      ? []
+      : reasonsResult.provided
+        ? reasonsResult.reasons
+        : feedback
+          ? normalizeFeedbackReasons(
+              feedback.reasons
+            )
+          : [];
 
   /*
    * ==========================================
@@ -636,6 +715,8 @@ export async function PUT(
             feedbackId,
             {
               rating,
+
+              reasons,
 
               comment,
             }
@@ -661,19 +742,19 @@ export async function PUT(
         }
       );
 
-      return respond(
-        apiError(
-          requestId,
-          503,
-          "FEEDBACK_UPDATE_FAILED",
-          "ثبت بازخورد انجام نشد."
-        )
+      return apiError(
+        requestId,
+        503,
+        "FEEDBACK_UPDATE_FAILED",
+        "ثبت بازخورد انجام نشد."
       );
     }
   } else {
     /*
      * ========================================
-     * Create + Race Recovery
+     * Create
+     *
+     * user و message از Body گرفته نمی‌شوند.
      * ========================================
      */
 
@@ -692,9 +773,19 @@ export async function PUT(
 
             rating,
 
+            reasons,
+
             comment,
           });
     } catch (error) {
+      /*
+       * ======================================
+       * Race Recovery
+       *
+       * برای Unique(message,user)
+       * ======================================
+       */
+
       let existing:
         RecordModel |
         null;
@@ -731,13 +822,11 @@ export async function PUT(
           }
         );
 
-        return respond(
-          apiError(
-            requestId,
-            503,
-            "FEEDBACK_CREATE_FAILED",
-            "ثبت بازخورد انجام نشد."
-          )
+        return apiError(
+          requestId,
+          503,
+          "FEEDBACK_CREATE_FAILED",
+          "ثبت بازخورد انجام نشد."
         );
       }
 
@@ -762,15 +851,23 @@ export async function PUT(
           }
         );
 
-        return respond(
-          apiError(
-            requestId,
-            503,
-            "FEEDBACK_CREATE_FAILED",
-            "ثبت بازخورد انجام نشد."
-          )
+        return apiError(
+          requestId,
+          503,
+          "FEEDBACK_CREATE_FAILED",
+          "ثبت بازخورد انجام نشد."
         );
       }
+
+      const recoveryReasons =
+        rating ===
+        "up"
+          ? []
+          : reasonsResult.provided
+            ? reasonsResult.reasons
+            : normalizeFeedbackReasons(
+                existing.reasons
+              );
 
       try {
         feedback =
@@ -782,6 +879,9 @@ export async function PUT(
               existing.id,
               {
                 rating,
+
+                reasons:
+                  recoveryReasons,
 
                 comment,
               }
@@ -810,41 +910,41 @@ export async function PUT(
           }
         );
 
-        return respond(
-          apiError(
-            requestId,
-            503,
-            "FEEDBACK_RACE_RECOVERY_FAILED",
-            "ثبت بازخورد انجام نشد."
-          )
+        return apiError(
+          requestId,
+          503,
+          "FEEDBACK_RACE_RECOVERY_FAILED",
+          "ثبت بازخورد انجام نشد."
         );
       }
     }
   }
 
+  /*
+   * ==========================================
+   * Success
+   * ==========================================
+   */
+
   if (
     !feedback
   ) {
-    return respond(
-      apiError(
-        requestId,
-        500,
-        "FEEDBACK_MISSING_AFTER_SAVE",
-        "بازخورد ذخیره شد اما نتیجه قابل بازیابی نیست."
-      )
+    return apiError(
+      requestId,
+      500,
+      "FEEDBACK_MISSING_AFTER_SAVE",
+      "بازخورد ذخیره شد اما نتیجه قابل بازیابی نیست."
     );
   }
 
-  return respond(
-    apiSuccess(
-      requestId,
-      {
-        feedback:
-          toFeedback(
-            feedback
-          ),
-      }
-    )
+  return apiSuccess(
+    requestId,
+    {
+      feedback:
+        toFeedback(
+          feedback
+        ),
+    }
   );
 }
 
@@ -852,7 +952,7 @@ export async function PUT(
  * ============================================
  * DELETE
  *
- * Shared message.feedback Rate Limit
+ * حذف رأی
  * ============================================
  */
 
@@ -868,6 +968,12 @@ export async function DELETE(
 ) {
   const requestId =
     crypto.randomUUID();
+
+  /*
+   * ==========================================
+   * Message ID
+   * ==========================================
+   */
 
   const {
     messageId,
@@ -886,12 +992,16 @@ export async function DELETE(
     );
   }
 
+  /*
+   * ==========================================
+   * Authentication
+   * ==========================================
+   */
+
   const session =
     await getAuthenticatedPocketBase();
 
-  if (
-    !session
-  ) {
+  if (!session) {
     return apiError(
       requestId,
       401,
@@ -904,34 +1014,11 @@ export async function DELETE(
     account,
   } = session;
 
-  const rateLimitResult =
-    await consumeMessageFeedbackRateLimit({
-      requestId,
-
-      userId:
-        account.id,
-
-      messageId,
-    });
-
-  if (
-    !rateLimitResult.ok
-  ) {
-    return rateLimitResult.response;
-  }
-
-  const rateLimit =
-    rateLimitResult.rateLimit;
-
-  const respond =
-    <TResponse extends Response>(
-      response:
-        TResponse
-    ) =>
-      withRateLimitHeaders(
-        response,
-        rateLimit
-      );
+  /*
+   * ==========================================
+   * Service Client
+   * ==========================================
+   */
 
   let pb:
     PocketBase;
@@ -957,15 +1044,19 @@ export async function DELETE(
       }
     );
 
-    return respond(
-      apiError(
-        requestId,
-        503,
-        "FEEDBACK_SERVICE_UNAVAILABLE",
-        "سرویس بازخورد موقتاً در دسترس نیست."
-      )
+    return apiError(
+      requestId,
+      503,
+      "FEEDBACK_SERVICE_UNAVAILABLE",
+      "سرویس بازخورد موقتاً در دسترس نیست."
     );
   }
+
+  /*
+   * ==========================================
+   * Ownership
+   * ==========================================
+   */
 
   let message:
     RecordModel |
@@ -999,28 +1090,30 @@ export async function DELETE(
       }
     );
 
-    return respond(
-      apiError(
-        requestId,
-        503,
-        "FEEDBACK_MESSAGE_CHECK_FAILED",
-        "بررسی پیام موقتاً امکان‌پذیر نیست."
-      )
+    return apiError(
+      requestId,
+      503,
+      "FEEDBACK_MESSAGE_CHECK_FAILED",
+      "بررسی پیام موقتاً امکان‌پذیر نیست."
     );
   }
 
   if (
     !message
   ) {
-    return respond(
-      apiError(
-        requestId,
-        404,
-        "MESSAGE_NOT_FOUND",
-        "پیام موردنظر پیدا نشد."
-      )
+    return apiError(
+      requestId,
+      404,
+      "MESSAGE_NOT_FOUND",
+      "پیام موردنظر پیدا نشد."
     );
   }
+
+  /*
+   * ==========================================
+   * Find Feedback
+   * ==========================================
+   */
 
   let feedback:
     RecordModel |
@@ -1056,37 +1149,40 @@ export async function DELETE(
       }
     );
 
-    return respond(
-      apiError(
-        requestId,
-        503,
-        "FEEDBACK_LOOKUP_FAILED",
-        "بررسی بازخورد فعلی انجام نشد."
-      )
+    return apiError(
+      requestId,
+      503,
+      "FEEDBACK_LOOKUP_FAILED",
+      "بررسی بازخورد فعلی انجام نشد."
     );
   }
 
   /*
-   * Idempotent Delete همچنان Rate Limit
-   * Consume کرده است.
+   * ==========================================
+   * Idempotent Delete
+   * ==========================================
    */
 
   if (
     !feedback
   ) {
-    return respond(
-      apiSuccess(
-        requestId,
-        {
-          feedback:
-            null,
+    return apiSuccess(
+      requestId,
+      {
+        feedback:
+          null,
 
-          alreadyDeleted:
-            true,
-        }
-      )
+        alreadyDeleted:
+          true,
+      }
     );
   }
+
+  /*
+   * ==========================================
+   * Delete
+   * ==========================================
+   */
 
   const feedbackId =
     feedback.id;
@@ -1120,228 +1216,21 @@ export async function DELETE(
       }
     );
 
-    return respond(
-      apiError(
-        requestId,
-        503,
-        "FEEDBACK_DELETE_FAILED",
-        "حذف بازخورد انجام نشد."
-      )
-    );
-  }
-
-  return respond(
-    apiSuccess(
+    return apiError(
       requestId,
-      {
-        feedback:
-          null,
-      }
-    )
-  );
-}
+      503,
+      "FEEDBACK_DELETE_FAILED",
+      "حذف بازخورد انجام نشد."
+    );
+  }
 
-/*
- * ============================================
- * Feedback Rate Limit Helper
- * ============================================
- */
-
-async function consumeMessageFeedbackRateLimit({
-  requestId,
-  userId,
-  messageId,
-}: {
-  requestId:
-    string;
-
-  userId:
-    string;
-
-  messageId:
-    string;
-}): Promise<
-  | {
-      ok:
-        true;
-
-      rateLimit: {
-        allowed:
-          true;
-
-        limit:
-          number;
-
-        remaining:
-          number;
-
-        resetAt:
-          string;
-      };
+  return apiSuccess(
+    requestId,
+    {
+      feedback:
+        null,
     }
-  | {
-      ok:
-        false;
-
-      response:
-        Response;
-    }
-> {
-  let rateLimit:
-    Awaited<
-      ReturnType<
-        typeof consumeFeedbackRateLimit
-      >
-    >;
-
-  try {
-    rateLimit =
-      await consumeFeedbackRateLimit({
-        userId,
-
-        action:
-          "message.feedback",
-
-        requestId,
-      });
-  } catch (error) {
-    console.error(
-      "Message feedback rate limit unavailable",
-      {
-        requestId,
-
-        userId,
-
-        messageId,
-
-        error:
-          safeErrorMetadata(
-            error
-          ),
-      }
-    );
-
-    return {
-      ok:
-        false,
-
-      response:
-        apiError(
-          requestId,
-          503,
-          "MESSAGE_FEEDBACK_RATE_LIMIT_UNAVAILABLE",
-          "امکان بررسی محدودیت بازخورد در حال حاضر وجود ندارد. دوباره تلاش کنید."
-        ),
-    };
-  }
-
-  if (
-    !rateLimit.allowed
-  ) {
-    const response =
-      apiError(
-        requestId,
-        429,
-        "MESSAGE_FEEDBACK_RATE_LIMITED",
-        "تعداد تغییرات بازخورد بیش از حد مجاز است. کمی بعد دوباره تلاش کنید.",
-        {
-          retryAfterSeconds:
-            rateLimit.retryAfterSeconds,
-
-          limit:
-            rateLimit.limit,
-
-          remaining:
-            rateLimit.remaining,
-
-          resetAt:
-            rateLimit.resetAt,
-        }
-      );
-
-    response.headers.set(
-      "Retry-After",
-      String(
-        rateLimit.retryAfterSeconds
-      )
-    );
-
-    response.headers.set(
-      "X-RateLimit-Limit",
-      String(
-        rateLimit.limit
-      )
-    );
-
-    response.headers.set(
-      "X-RateLimit-Remaining",
-      "0"
-    );
-
-    response.headers.set(
-      "X-RateLimit-Reset",
-      rateLimit.resetAt
-    );
-
-    return {
-      ok:
-        false,
-
-      response,
-    };
-  }
-
-  return {
-    ok:
-      true,
-
-    rateLimit,
-  };
-}
-
-/*
- * ============================================
- * Rate Limit Headers
- * ============================================
- */
-
-function withRateLimitHeaders<
-  TResponse extends Response,
->(
-  response:
-    TResponse,
-
-  rateLimit: {
-    limit:
-      number;
-
-    remaining:
-      number;
-
-    resetAt:
-      string;
-  }
-) {
-  response.headers.set(
-    "X-RateLimit-Limit",
-    String(
-      rateLimit.limit
-    )
   );
-
-  response.headers.set(
-    "X-RateLimit-Remaining",
-    String(
-      rateLimit.remaining
-    )
-  );
-
-  response.headers.set(
-    "X-RateLimit-Reset",
-    rateLimit.resetAt
-  );
-
-  return response;
 }
 
 /*
@@ -1651,7 +1540,12 @@ async function findFeedback({
 function toFeedback(
   record:
     RecordModel
-): ChatFeedback {
+): FeedbackPayload {
+  const reasons =
+    normalizeFeedbackReasons(
+      record.reasons
+    );
+
   return {
     id:
       record.id,
@@ -1661,6 +1555,13 @@ function toFeedback(
       "down"
         ? "down"
         : "up",
+
+    ...(reasons.length >
+    0
+      ? {
+          reasons,
+        }
+      : {}),
 
     ...(record.comment
       ? {
@@ -1733,6 +1634,244 @@ function getRating(
   }
 
   return null;
+}
+
+/*
+ * ============================================
+ * Reasons Validation
+ * ============================================
+ */
+
+function getReasons(
+  body:
+    unknown
+):
+  | {
+      ok:
+        true;
+
+      provided:
+        boolean;
+
+      reasons:
+        FeedbackReason[];
+    }
+  | {
+      ok:
+        false;
+
+      code:
+        string;
+
+      message:
+        string;
+    } {
+  if (
+    typeof body !==
+      "object" ||
+    body ===
+      null
+  ) {
+    return {
+      ok:
+        false,
+
+      code:
+        "INVALID_FEEDBACK_REASONS",
+
+      message:
+        "دلایل بازخورد معتبر نیست.",
+    };
+  }
+
+  if (
+    !(
+      "reasons" in
+      body
+    )
+  ) {
+    return {
+      ok:
+        true,
+
+      provided:
+        false,
+
+      reasons:
+        [],
+    };
+  }
+
+  const value =
+    (
+      body as {
+        reasons?:
+          unknown;
+      }
+    ).reasons;
+
+  if (
+    !Array.isArray(
+      value
+    )
+  ) {
+    return {
+      ok:
+        false,
+
+      code:
+        "INVALID_FEEDBACK_REASONS",
+
+      message:
+        "دلایل بازخورد باید به‌صورت فهرست ارسال شوند.",
+    };
+  }
+
+  if (
+    value.length >
+    MAX_FEEDBACK_REASONS
+  ) {
+    return {
+      ok:
+        false,
+
+      code:
+        "TOO_MANY_FEEDBACK_REASONS",
+
+      message:
+        `حداکثر ${MAX_FEEDBACK_REASONS} دلیل برای بازخورد قابل انتخاب است.`,
+    };
+  }
+
+  const reasons:
+    FeedbackReason[] =
+    [];
+
+  for (
+    const item of
+    value
+  ) {
+    if (
+      typeof item !==
+      "string"
+    ) {
+      return {
+        ok:
+          false,
+
+        code:
+          "INVALID_FEEDBACK_REASONS",
+
+        message:
+          "یکی از دلایل بازخورد معتبر نیست.",
+      };
+    }
+
+    const reason =
+      item.trim();
+
+    if (
+      !isFeedbackReason(
+        reason
+      )
+    ) {
+      return {
+        ok:
+          false,
+
+        code:
+          "INVALID_FEEDBACK_REASONS",
+
+        message:
+          "یکی از دلایل بازخورد معتبر نیست.",
+      };
+    }
+
+    if (
+      !reasons.includes(
+        reason
+      )
+    ) {
+      reasons.push(
+        reason
+      );
+    }
+  }
+
+  return {
+    ok:
+      true,
+
+    provided:
+      true,
+
+    reasons,
+  };
+}
+
+function normalizeFeedbackReasons(
+  value:
+    unknown
+): FeedbackReason[] {
+  if (
+    !Array.isArray(
+      value
+    )
+  ) {
+    return [];
+  }
+
+  const result:
+    FeedbackReason[] =
+    [];
+
+  for (
+    const item of
+    value
+  ) {
+    if (
+      typeof item !==
+      "string"
+    ) {
+      continue;
+    }
+
+    const reason =
+      item.trim();
+
+    if (
+      !isFeedbackReason(
+        reason
+      ) ||
+      result.includes(
+        reason
+      )
+    ) {
+      continue;
+    }
+
+    result.push(
+      reason
+    );
+
+    if (
+      result.length >=
+      MAX_FEEDBACK_REASONS
+    ) {
+      break;
+    }
+  }
+
+  return result;
+}
+
+function isFeedbackReason(
+  value:
+    string
+): value is FeedbackReason {
+  return FEEDBACK_REASONS.has(
+    value as FeedbackReason
+  );
 }
 
 /*
@@ -1911,9 +2050,6 @@ function apiSuccess(
 
         "X-Request-Id":
           requestId,
-
-        "X-Content-Type-Options":
-          "nosniff",
       },
     }
   );
@@ -1936,13 +2072,7 @@ function apiError(
     string,
 
   message:
-    string,
-
-  extra?:
-    Record<
-      string,
-      unknown
-    >
+    string
 ) {
   return NextResponse.json(
     {
@@ -1952,9 +2082,6 @@ function apiError(
       code,
 
       message,
-
-      ...(extra ||
-        {}),
 
       requestId,
     },
@@ -1970,9 +2097,6 @@ function apiError(
 
         "X-Request-Id":
           requestId,
-
-        "X-Content-Type-Options":
-          "nosniff",
       },
     }
   );
@@ -2036,9 +2160,6 @@ function safeErrorMetadata(
       name?:
         unknown;
 
-      message?:
-        unknown;
-
       status?:
         unknown;
 
@@ -2051,12 +2172,6 @@ function safeErrorMetadata(
       typeof value.name ===
       "string"
         ? value.name
-        : undefined,
-
-    message:
-      typeof value.message ===
-      "string"
-        ? value.message
         : undefined,
 
     status:
