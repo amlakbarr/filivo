@@ -296,15 +296,35 @@ export async function GET(
           }
         );
 
+    /*
+     * PocketBase در بعضی شرایط Relation ID را
+     * برمی‌گرداند، اما expand.topic در Response
+     * وجود ندارد.
+     *
+     * Serializer استاندارد همیشه اولویت دارد.
+     * فقط Topicهای unresolved با Batch Query
+     * تکمیل می‌شوند.
+     */
+
+    const items =
+      await serializeKnowledgeListItems({
+        pb,
+
+        records:
+          result.items,
+
+        requestId,
+
+        adminId:
+          admin.account.id,
+      });
+
     return knowledgeApiResponse(
       {
         success:
           true,
 
-        items:
-          result.items.map(
-            serializeKnowledgeItem
-          ),
+        items,
 
         page:
           result.page,
@@ -712,7 +732,7 @@ export async function POST(
   let created:
     KnowledgeItemRecord |
     null =
-    null;
+      null;
 
   let syncAuditWritten =
     false;
@@ -1270,6 +1290,272 @@ export async function POST(
       )
     );
   }
+}
+
+/*
+ * ============================================
+ * Knowledge List Serialization
+ *
+ * PocketBase ممکن است Relation ID مربوط به
+ * Topic را برگرداند، ولی expand.topic در
+ * Response وجود نداشته باشد.
+ *
+ * Serializer استاندارد همیشه اولویت دارد.
+ * ============================================
+ */
+
+async function serializeKnowledgeListItems({
+  pb,
+  records,
+  requestId,
+  adminId,
+}: {
+  pb:
+    PocketBase;
+
+  records:
+    KnowledgeItemRecord[];
+
+  requestId:
+    string;
+
+  adminId:
+    string;
+}) {
+  const serializedItems =
+    records.map(
+      serializeKnowledgeItem
+    );
+
+  /*
+   * فقط Topicهایی Lookup می‌شوند که:
+   *
+   * - Relation ID دارند
+   * - topic_name ندارند
+   */
+
+  const unresolvedTopicIds = [
+    ...new Set(
+      serializedItems
+        .filter(
+          (
+            item
+          ) =>
+            Boolean(
+              item.topic
+            ) &&
+            !item.topic_name
+        )
+        .map(
+          (
+            item
+          ) =>
+            String(
+              item.topic ||
+                ""
+            ).trim()
+        )
+        .filter(
+          Boolean
+        )
+    ),
+  ];
+
+  if (
+    unresolvedTopicIds.length ===
+    0
+  ) {
+    return serializedItems;
+  }
+
+  const topicNamesById =
+    await loadTopicNamesById({
+      pb,
+
+      topicIds:
+        unresolvedTopicIds,
+
+      requestId,
+
+      adminId,
+    });
+
+  if (
+    topicNamesById.size ===
+    0
+  ) {
+    return serializedItems;
+  }
+
+  return serializedItems.map(
+    (
+      item
+    ) => {
+      if (
+        item.topic_name
+      ) {
+        return item;
+      }
+
+      const topicId =
+        String(
+          item.topic ||
+            ""
+        ).trim();
+
+      if (
+        !topicId
+      ) {
+        return item;
+      }
+
+      const topicName =
+        topicNamesById.get(
+          topicId
+        );
+
+      if (
+        !topicName
+      ) {
+        return item;
+      }
+
+      return {
+        ...item,
+
+        topic_name:
+          topicName,
+      };
+    }
+  );
+}
+
+/*
+ * ============================================
+ * Topic Name Fallback
+ *
+ * همه Topicها در یک Query خوانده می‌شوند تا
+ * N+1 Query ایجاد نشود.
+ *
+ * Failure این Lookup نباید GET پایگاه دانش را
+ * Fail کند.
+ * ============================================
+ */
+
+async function loadTopicNamesById({
+  pb,
+  topicIds,
+  requestId,
+  adminId,
+}: {
+  pb:
+    PocketBase;
+
+  topicIds:
+    string[];
+
+  requestId:
+    string;
+
+  adminId:
+    string;
+}) {
+  const topicNamesById =
+    new Map<
+      string,
+      string
+    >();
+
+  if (
+    topicIds.length ===
+    0
+  ) {
+    return topicNamesById;
+  }
+
+  const filterValues:
+    Record<
+      string,
+      string
+    > = {};
+
+  const clauses =
+    topicIds.map(
+      (
+        topicId,
+        index
+      ) => {
+        const key =
+          `topicId${index}`;
+
+        filterValues[
+          key
+        ] =
+          topicId;
+
+        return `id = {:${key}}`;
+      }
+    );
+
+  try {
+    const records =
+      await pb
+        .collection(
+          "topics"
+        )
+        .getFullList({
+          filter:
+            pb.filter(
+              `(${clauses.join(
+                " || "
+              )})`,
+              filterValues
+            ),
+
+          fields:
+            "id,name",
+        });
+
+    for (
+      const record of
+      records
+    ) {
+      const name =
+        String(
+          record.name ||
+            ""
+        ).trim();
+
+      if (
+        !name
+      ) {
+        continue;
+      }
+
+      topicNamesById.set(
+        record.id,
+        name
+      );
+    }
+  } catch (error) {
+    console.error(
+      "Knowledge topic names fallback failed",
+      {
+        requestId,
+
+        adminId,
+
+        topicIds,
+
+        error:
+          safeErrorMetadata(
+            error
+          ),
+      }
+    );
+  }
+
+  return topicNamesById;
 }
 
 /*
