@@ -19,15 +19,15 @@ export async function GET(
   _request:
     Request,
 
-  {
-    params,
-  }: {
-    params:
-      Promise<{
-        topicId:
-          string;
-      }>;
-  }
+ {
+  params,
+}: {
+  params:
+    Promise<{
+      id:
+        string;
+    }>;
+}
 ) {
   const requestId =
     crypto.randomUUID();
@@ -47,10 +47,10 @@ export async function GET(
   }
 
   const {
-    topicId:
-      rawTopicId,
-  } =
-    await params;
+  id:
+    rawTopicId,
+} =
+  await params;
 
   const topicId =
     String(

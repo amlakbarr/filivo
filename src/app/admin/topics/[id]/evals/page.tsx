@@ -40,17 +40,17 @@ type ResponseBody =
     };
 
 export default function TopicEvalDetailPage() {
-  const params =
-    useParams<{
-      topicId:
-        string;
-    }>();
+ const params =
+  useParams<{
+    id:
+      string;
+  }>();
 
-  const topicId =
-    String(
-      params.topicId ||
-        ""
-    );
+ const topicId =
+  String(
+    params.id ||
+      ""
+  );
 
   const [
     detail,
