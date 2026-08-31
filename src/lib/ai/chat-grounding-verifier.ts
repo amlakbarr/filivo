@@ -29,6 +29,10 @@ import type {
   ChatSource,
 } from "@/types/chat";
 
+import {
+  after,
+} from "next/server";
+
 const VERIFIER_MAX_OUTPUT_TOKENS = 140;
 const VERIFIER_RESERVATION_OVERHEAD_TOKENS = 256;
 const MAX_EVIDENCE_CHUNKS = 5;
@@ -347,38 +351,82 @@ export async function verifyGroundedAnswer({
     }
   );
 
-  const usageResult = await recordVerifierUsage({
-    userId,
-    conversationId,
-    messageId,
-    verifierRequestId,
-    model,
-    latencyMs,
-    response,
-    success: response.status === "completed",
-  });
+  after(async () => {
+  try {
+    const usageResult =
+      await recordVerifierUsage({
+        userId,
+        conversationId,
+        messageId,
+        verifierRequestId,
+        model,
+        latencyMs,
+        response,
+        success:
+          response.status ===
+          "completed",
+      });
 
-  if (usageResult?.ok) {
+    if (
+      !usageResult?.ok
+    ) {
+      return;
+    }
+
     try {
       await completeAIBudgetReservation({
         userId,
-        requestId: verifierRequestId,
-        actualTokens: usageResult.snapshot.totalTokens,
-        actualCostUsd: usageResult.estimatedCostUsd,
-        usageRecordId: usageResult.recordId,
+
+        requestId:
+          verifierRequestId,
+
+        actualTokens:
+          usageResult.snapshot
+            .totalTokens,
+
+        actualCostUsd:
+          usageResult
+            .estimatedCostUsd,
+
+        usageRecordId:
+          usageResult.recordId,
       });
     } catch (error) {
       console.error(
         "Grounding verifier reservation completion failed",
         {
           verifierRequestId,
+
           userId,
-          usageRecordId: usageResult.recordId,
-          error: safeErrorMetadata(error),
+
+          usageRecordId:
+            usageResult.recordId,
+
+          error:
+            safeErrorMetadata(
+              error
+            ),
         }
       );
     }
+  } catch (error) {
+    console.error(
+      "Grounding verifier background accounting failed",
+      {
+        verifierRequestId,
+
+        userId,
+
+        conversationId,
+
+        error:
+          safeErrorMetadata(
+            error
+          ),
+      }
+    );
   }
+});
 
   if (
     response.status !== "completed" ||
