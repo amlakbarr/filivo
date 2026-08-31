@@ -157,9 +157,8 @@ export function selectRelevantRetrievalResults({
   const uniqueKnowledgeItems =
     new Map<string, ChatRetrievalResult>();
 
-  if (citedFileIds.size === 0) {
-    return [];
-  }
+  const requireCitation =
+    citedFileIds.size > 0;
 
   for (const result of [...results].sort(
     (left, right) => right.score - left.score
@@ -171,7 +170,10 @@ export function selectRelevantRetrievalResults({
       result.score < minScore ||
       !result.text ||
       !result.knowledgeId ||
-      !citedFileIds.has(result.fileId)
+      (
+        requireCitation &&
+        !citedFileIds.has(result.fileId)
+      )
     ) {
       continue;
     }

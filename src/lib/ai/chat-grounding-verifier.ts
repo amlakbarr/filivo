@@ -14,8 +14,8 @@ import type {
 } from "@/lib/ai/chat-retrieval";
 
 import {
+  getOpenAIClassifierModel,
   getOpenAIClient,
-  getOpenAIModel,
 } from "@/lib/ai/openai";
 
 import {
@@ -29,11 +29,11 @@ import type {
   ChatSource,
 } from "@/types/chat";
 
-const VERIFIER_MAX_OUTPUT_TOKENS = 220;
+const VERIFIER_MAX_OUTPUT_TOKENS = 140;
 const VERIFIER_RESERVATION_OVERHEAD_TOKENS = 256;
-const MAX_EVIDENCE_CHUNKS = 12;
-const MAX_EVIDENCE_TOTAL_CHARACTERS = 18_000;
-const MAX_EVIDENCE_CHUNK_CHARACTERS = 4_000;
+const MAX_EVIDENCE_CHUNKS = 5;
+const MAX_EVIDENCE_TOTAL_CHARACTERS = 12_000;
+const MAX_EVIDENCE_CHUNK_CHARACTERS = 3_000;
 const MAX_UNSUPPORTED_CLAIMS = 8;
 
 export type GroundingVerificationReason =
@@ -127,6 +127,23 @@ export async function verifyGroundedAnswer({
     Number.MAX_SAFE_INTEGER,
     estimateUtf8TokenUpperBound(verifierInput) +
       VERIFIER_RESERVATION_OVERHEAD_TOKENS
+  );
+
+  logVerifierDiagnostics(
+    "prepared",
+    {
+      verifierRequestId,
+      model,
+      evidenceCharacters:
+        evidence.length,
+      inputCharacters:
+        verifierInput.length,
+      estimatedInputTokens,
+      citedFileCount:
+        citedFileIds.size,
+      sourceCount:
+        sources.length,
+    }
   );
 
   try {
@@ -319,6 +336,17 @@ export async function verifyGroundedAnswer({
 
   const latencyMs = Date.now() - startedAt;
 
+  logVerifierDiagnostics(
+    "openai_completed",
+    {
+      verifierRequestId,
+      model,
+      latencyMs,
+      responseStatus:
+        response.status,
+    }
+  );
+
   const usageResult = await recordVerifierUsage({
     userId,
     conversationId,
@@ -419,6 +447,9 @@ function buildEvidence({
     return "";
   }
 
+  const requireCitation =
+    citedFileIds.size > 0;
+
   const chunks = retrievalResults
     .filter((result) =>
       result.attributes.status === "published" &&
@@ -428,7 +459,10 @@ function buildEvidence({
       allowedKnowledgeIds.has(
         cleanRecordId(result.knowledgeId)
       ) &&
-      citedFileIds.has(result.fileId)
+      (
+        !requireCitation ||
+        citedFileIds.has(result.fileId)
+      )
     )
     .sort((left, right) => right.score - left.score)
     .slice(0, MAX_EVIDENCE_CHUNKS);
@@ -614,7 +648,7 @@ async function recordVerifierUsage({
 function getGroundingVerifierModel() {
   return (
     process.env.OPENAI_GROUNDING_VERIFIER_MODEL?.trim() ||
-    getOpenAIModel()
+    getOpenAIClassifierModel()
   );
 }
 
@@ -642,6 +676,35 @@ function safeBudgetInteger(value: number) {
   return Math.max(
     0,
     Math.min(Number.MAX_SAFE_INTEGER, Math.trunc(value))
+  );
+}
+
+function logVerifierDiagnostics(
+  event:
+    string,
+
+  metadata:
+    Record<
+      string,
+      unknown
+    >
+) {
+  if (
+    process.env
+      .GROUNDING_VERIFIER_DIAGNOSTICS_ENABLED
+      ?.trim()
+      .toLowerCase() !==
+    "true"
+  ) {
+    return;
+  }
+
+  console.info(
+    "Grounding verifier diagnostics",
+    {
+      event,
+      ...metadata,
+    }
   );
 }
 
