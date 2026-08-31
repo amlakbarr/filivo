@@ -200,6 +200,31 @@ export default function ChatWindow({
 
   /*
    * ==========================================
+   * Perceived Latency / Progress UX
+   * ==========================================
+   */
+
+  const [
+    pendingDisplayMessage,
+    setPendingDisplayMessage,
+  ] =
+    useState("");
+
+  const [
+    waitingStatus,
+    setWaitingStatus,
+  ] =
+    useState(
+      "در حال بررسی سؤال..."
+    );
+
+  const messagesEndRef =
+    useRef<HTMLDivElement | null>(
+      null
+    );
+
+  /*
+   * ==========================================
    * Feedback state
    * ==========================================
    */
@@ -276,6 +301,85 @@ export default function ChatWindow({
     } | null>(
       null
     );
+
+  /*
+   * ==========================================
+   * Waiting Status
+   *
+   * این متن‌ها وضعیت دقیق Backend را ادعا
+   * نمی‌کنند؛ فقط به کاربر نشان می‌دهند که
+   * درخواست همچنان در حال پردازش است.
+   * ==========================================
+   */
+
+  useEffect(() => {
+    if (
+      !sending
+    ) {
+      setWaitingStatus(
+        "در حال بررسی سؤال..."
+      );
+
+      return;
+    }
+
+    setWaitingStatus(
+      "در حال بررسی سؤال..."
+    );
+
+    const preparingTimer =
+      window.setTimeout(
+        () => {
+          setWaitingStatus(
+            "در حال آماده‌سازی پاسخ..."
+          );
+        },
+        2500
+      );
+
+    const verificationTimer =
+      window.setTimeout(
+        () => {
+          setWaitingStatus(
+            "در حال بررسی نهایی پاسخ..."
+          );
+        },
+        6500
+      );
+
+    return () => {
+      window.clearTimeout(
+        preparingTimer
+      );
+
+      window.clearTimeout(
+        verificationTimer
+      );
+    };
+  }, [
+    sending,
+  ]);
+
+  /*
+   * ==========================================
+   * Auto Scroll
+   * ==========================================
+   */
+
+  useEffect(() => {
+    messagesEndRef.current
+      ?.scrollIntoView({
+        behavior:
+          "smooth",
+
+        block:
+          "end",
+      });
+  }, [
+    messages.length,
+    sending,
+    waitingStatus,
+  ]);
 
   /*
    * ==========================================
@@ -482,6 +586,10 @@ export default function ChatWindow({
       ""
     );
 
+    setPendingDisplayMessage(
+      content
+    );
+
     const pendingMessage =
       pendingMessageRef
         .current
@@ -664,6 +772,10 @@ export default function ChatWindow({
         "خطا در ارتباط با سرور. اتصال شبکه را بررسی کنید."
       );
     } finally {
+      setPendingDisplayMessage(
+        ""
+      );
+
       setSending(
         false
       );
@@ -1470,7 +1582,8 @@ export default function ChatWindow({
         <div className="mx-auto max-w-3xl px-5 py-8">
 
           {messages.length ===
-          0 ? (
+            0 &&
+          !sending ? (
 
             <div className="flex min-h-[55vh] items-center justify-center">
 
@@ -1925,17 +2038,62 @@ export default function ChatWindow({
                 }
               )}
 
-              {sending && (
+              {sending &&
+                pendingDisplayMessage && (
 
-                <div className="flex justify-end">
+                <div className="flex justify-start">
 
-                  <div className="rounded-2xl bg-gray-100 px-4 py-3 text-sm text-gray-500">
-                    در حال بررسی سوال...
+                  <div className="max-w-[80%] rounded-2xl bg-black px-4 py-3 text-sm leading-7 text-white">
+
+                    <div className="whitespace-pre-wrap">
+                      {
+                        pendingDisplayMessage
+                      }
+                    </div>
+
                   </div>
 
                 </div>
 
               )}
+
+              {sending && (
+
+                <div className="flex justify-end">
+
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="flex items-center gap-2 rounded-2xl bg-gray-100 px-4 py-3 text-sm text-gray-500"
+                  >
+                    <span
+                      className="inline-flex gap-1"
+                      aria-hidden="true"
+                    >
+                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gray-400" />
+
+                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gray-400 [animation-delay:150ms]" />
+
+                      <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gray-400 [animation-delay:300ms]" />
+                    </span>
+
+                    <span>
+                      {
+                        waitingStatus
+                      }
+                    </span>
+                  </div>
+
+                </div>
+
+              )}
+
+              <div
+                ref={
+                  messagesEndRef
+                }
+                aria-hidden="true"
+              />
 
             </div>
 
