@@ -277,7 +277,7 @@ export async function verifyGroundedAnswer({
       instructions: VERIFIER_INSTRUCTIONS,
       input: verifierInput,
       reasoning: {
-        effort: "none",
+        effort: "minimal",
       },
       text: {
         verbosity: "low",
