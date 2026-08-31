@@ -281,8 +281,11 @@ export async function verifyGroundedAnswer({
       instructions: VERIFIER_INSTRUCTIONS,
       input: verifierInput,
       reasoning: {
-        effort: "minimal",
-      },
+  effort:
+    getVerifierReasoningEffort(
+      model
+    ),
+},
       text: {
         verbosity: "low",
         format: {
@@ -794,4 +797,24 @@ function safeErrorMetadata(error: unknown) {
         ? value.request_id
         : undefined,
   };
+}
+
+function getVerifierReasoningEffort(
+  model:
+    string
+) {
+  const normalized =
+    model
+      .trim()
+      .toLowerCase();
+
+  if (
+    normalized.includes(
+      "gpt-5-mini"
+    )
+  ) {
+    return "minimal" as const;
+  }
+
+  return "none" as const;
 }

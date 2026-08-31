@@ -311,54 +311,45 @@ export default function ChatWindow({
    * درخواست همچنان در حال پردازش است.
    * ==========================================
    */
+useEffect(() => {
+  if (
+    !sending
+  ) {
+    return;
+  }
 
-  useEffect(() => {
-    if (
-      !sending
-    ) {
-      setWaitingStatus(
-        "در حال بررسی سؤال..."
-      );
-
-      return;
-    }
-
-    setWaitingStatus(
-      "در حال بررسی سؤال..."
+  const preparingTimer =
+    window.setTimeout(
+      () => {
+        setWaitingStatus(
+          "در حال آماده‌سازی پاسخ..."
+        );
+      },
+      2500
     );
 
-    const preparingTimer =
-      window.setTimeout(
-        () => {
-          setWaitingStatus(
-            "در حال آماده‌سازی پاسخ..."
-          );
-        },
-        2500
-      );
+  const verificationTimer =
+    window.setTimeout(
+      () => {
+        setWaitingStatus(
+          "در حال بررسی نهایی پاسخ..."
+        );
+      },
+      6500
+    );
 
-    const verificationTimer =
-      window.setTimeout(
-        () => {
-          setWaitingStatus(
-            "در حال بررسی نهایی پاسخ..."
-          );
-        },
-        6500
-      );
+  return () => {
+    window.clearTimeout(
+      preparingTimer
+    );
 
-    return () => {
-      window.clearTimeout(
-        preparingTimer
-      );
-
-      window.clearTimeout(
-        verificationTimer
-      );
-    };
-  }, [
-    sending,
-  ]);
+    window.clearTimeout(
+      verificationTimer
+    );
+  };
+}, [
+  sending,
+]);
 
   /*
    * ==========================================
@@ -573,18 +564,21 @@ export default function ChatWindow({
     ) {
       return;
     }
+setWaitingStatus(
+  "در حال بررسی سؤال..."
+);
 
-    setSending(
-      true
-    );
+setSending(
+  true
+);
 
-    setError(
-      ""
-    );
+setError(
+  ""
+);
 
-    setWarning(
-      ""
-    );
+setWarning(
+  ""
+);
 
     setPendingDisplayMessage(
       content
@@ -772,14 +766,18 @@ export default function ChatWindow({
         "خطا در ارتباط با سرور. اتصال شبکه را بررسی کنید."
       );
     } finally {
-      setPendingDisplayMessage(
-        ""
-      );
+  setPendingDisplayMessage(
+    ""
+  );
 
-      setSending(
-        false
-      );
-    }
+  setWaitingStatus(
+    "در حال بررسی سؤال..."
+  );
+
+  setSending(
+    false
+  );
+}
   }
 
   /*
